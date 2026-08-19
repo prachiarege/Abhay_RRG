@@ -1,7 +1,7 @@
 # Deviations from the SRS, and open questions
 
 Every place this implementation departs from the SRS, with the reason. Read this alongside
-`RRG_CALCULATION_SPEC.md`. Items in §1 and §7 need a decision from the client.
+`RRG_CALCULATION_SPEC.md`. Items in **§1, §7 and §9** need a decision from the client.
 
 ---
 
@@ -140,3 +140,56 @@ The trading calendar is therefore derived from the benchmark's own observed date
 than a hand-maintained holiday list, which cannot go stale. The holiday file
 (`backend/config/nse_holidays.json`) is used only to suppress spurious gap warnings and
 ships intentionally empty.
+
+---
+
+## 9. Setup assumptions made without an answer
+
+Four build-time choices were put to the client before development started. No answer was
+received (the session was non-interactive), so each was taken on the recommended default and
+built in a way that keeps it cheap to reverse. Recorded here so they can be overturned
+deliberately rather than discovered later.
+
+### 9.1 Git remote — local commits, remote attached mid-build
+
+Initially committed locally only, on the principle that pushing to a remote nobody had named
+is not a decision to make on someone's behalf. The client supplied
+`https://github.com/prachiarege/Abhay_RRG` during the build and it was pushed there.
+
+*Settled.* No action needed.
+
+### 9.2 Data provider — Yahoo as the live default
+
+Chosen so the application works on day one with no key and no contract. CSV is the
+deterministic fallback and NSE is a documented stub.
+
+**Reversal cost:** one environment variable (`RRG_DATA_PROVIDER`) plus, for a licensed feed,
+one new class in `app/providers/`. No calculation code changes.
+
+**This one should be overturned** — see §1. It is the same decision as §7 item 1.
+
+### 9.3 Scope — Phase 1 plus playback and rotation detection
+
+Delivered all 18 MVP acceptance criteria (SRS 47), plus historical playback (SRS 21) and
+quadrant-transition detection (SRS 23), which were nearly free once the engine was properly
+causal.
+
+Deliberately **not** built: alert delivery channels, backtesting (SRS 42–43), portfolio
+allocation (SRS 44). Detection and storage for alerts exist; only delivery is missing.
+
+**If the client expected Phase 2 in this pass**, the missing pieces are sector detail pages
+beyond the current drawer, a relative-performance dashboard, custom sector groups, and alert
+delivery.
+
+### 9.4 Database — SQLite now, Postgres-ready
+
+Chosen because the machine has no Docker, Postgres or Redis, and requiring an infrastructure
+install before any code could run was not a reasonable default. Models and queries are
+Postgres-compatible; caching sits behind an interface so Redis drops in.
+
+**Reversal cost:** change `RRG_DATABASE_URL`, add Alembic. No model changes expected.
+
+**Caveat worth stating:** SQLite has not been exercised under concurrent write load, and the
+in-process cache is per-worker — so the current setup is single-worker only. Moving to
+Postgres plus Redis is a prerequisite for running more than one API worker, not an
+optimisation.

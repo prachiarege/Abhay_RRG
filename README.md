@@ -92,7 +92,7 @@ function, so history can be replayed without look-ahead.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Pipeline, module map, DB schema, deployment, configuration |
 | [`docs/API.md`](docs/API.md) | Endpoint reference with response shapes |
 | [`docs/UI_UX_SPEC.md`](docs/UI_UX_SPEC.md) | Design decisions and rationale |
-| [`docs/SRS_DEVIATIONS.md`](docs/SRS_DEVIATIONS.md) | **Read this.** Every departure from the SRS, and 6 open client decisions |
+| [`docs/SRS_DEVIATIONS.md`](docs/SRS_DEVIATIONS.md) | **Read this first.** Every departure from the SRS (§1–6), 6 open client decisions (§7), and the 4 build-time assumptions taken without an answer (§9) |
 
 ---
 
