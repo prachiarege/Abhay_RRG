@@ -113,6 +113,13 @@ class RRGQuery(BaseModel):
     sectors: str | None = Field(
         default=None, description="Comma-separated symbols. Omit for the default universe."
     )
+    level: str = Field(
+        default="sector",
+        description="sector = plot sector indices; stock = plot the constituents of one sector.",
+    )
+    sector: str | None = Field(
+        default=None, description="Sector to drill into. Required when level=stock."
+    )
     as_of: date | None = None
     tail: int = Field(default=10, ge=1, le=250)
     rs_period: int = Field(default=14, ge=2, le=250)
@@ -124,6 +131,15 @@ class RRGQuery(BaseModel):
     clip_sigma: float = Field(default=3.0, gt=0, le=10)
     center: float = Field(default=100.0, gt=0)
     include_partial: bool = False
+
+    @field_validator("level")
+    @classmethod
+    def _check_level(cls, value: str) -> str:
+        allowed = {"sector", "stock"}
+        lowered = value.strip().lower()
+        if lowered not in allowed:
+            raise ValueError(f"level must be one of {sorted(allowed)}")
+        return lowered
 
     @field_validator("frequency")
     @classmethod

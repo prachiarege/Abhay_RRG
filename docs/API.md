@@ -16,7 +16,9 @@ endpoints. Omitted parameters fall back to configured defaults, not to literals.
 |---|---|---|---|
 | `benchmark` | string | `RRG_DEFAULT_BENCHMARK` | must exist in `benchmarks` |
 | `frequency` | `daily` \| `weekly` | `weekly` | |
-| `sectors` | CSV symbols | default universe | |
+| `sectors` | CSV symbols | default universe | at `level=stock` these are TICKERS, not sectors |
+| `level` | `sector` \| `stock` | `sector` | `stock` plots the constituents of one sector |
+| `sector` | string | – | the index to drill into; required when `level=stock` |
 | `as_of` | `YYYY-MM-DD` | latest | |
 | `tail` | int | 10 | 1–250, capped by `RRG_MAX_TAIL_LENGTH` |
 | `rs_period` | int | 14 | 2–250 |
@@ -146,7 +148,67 @@ Full computed history plus statistics for one sector (SRS 18): `rs_ratio`, `rs_m
 
 ---
 
-## `GET /api/sectors` · `GET /api/benchmarks`
+## `GET /api/sectors/{symbol}/constituents`
+
+The stocks making up one sector index, for the drill-down picker.
+
+```json
+{
+  "sector": "NIFTY_FMCG",
+  "sector_name": "FMCG",
+  "membership_as_of": "2026-08-01",
+  "count": 15,
+  "data_loaded": 15,
+  "stocks": [
+    { "symbol": "ITC", "name": "ITC", "color": "#22c55e", "active": true,
+      "available": true, "data_loaded": true, "latest_date": "2026-08-19" }
+  ]
+}
+```
+
+- **`available: false`** means the provider has no series for that stock. It is recorded
+  rather than hidden, because index MEMBERSHIP is a real fact even when price data is
+  missing; the picker greys it out with a reason.
+- **`data_loaded`** says whether prices are already stored. On a first drill-down they are
+  not, and the RRG request fetches them, so the client should show progress.
+- **`membership_as_of`** dates the snapshot. See the composition-bias note below.
+
+`404` for an unknown sector, or one with no constituents recorded.
+
+## `POST /api/sectors/{symbol}/constituents/refresh`
+
+Download constituent price history. `force=true` re-fetches stocks that already have data.
+Normally unnecessary, since `/api/rrg` fetches lazily.
+
+## Stock-level RRG
+
+```http
+GET /api/rrg?level=stock&sector=NIFTY_FMCG&sectors=ITC,HINDUNILVR,NESTLEIND
+```
+
+Same response shape as the sector-level payload, plus:
+
+- top level: `level: "stock"`, `sector`, `membership_as_of`
+- each entry: `level`, `parent_sector`, `membership_as_of`
+
+**Lazy loading.** The first request for a sector downloads its constituents (roughly 10-20
+symbols, a few seconds); later requests come from the database. Constituents are not fetched
+for every sector up front, because that would turn the desktop app's two-minute first run
+into something nearer ten, loading data for sectors the user may never open.
+
+**Composition bias, stated plainly.** Membership is a point-in-time snapshot. A stock-level
+RRG drawn over two years uses *today's* members, so anything since removed from the index is
+absent: the historical view is not survivorship-free. This is the same family of problem as
+look-ahead bias, and no static list can fix it. Accurate historical study needs dated
+membership history from a licensed vendor. For "which stocks in this sector are leading now",
+a current snapshot is the correct input. `membership_as_of` lets clients state which snapshot
+they used, and the UI does.
+
+**Single sector only.** There is no multi-sector stock mode. Constituents of two different
+indices share no meaningful peer group, and the rotation score is a percentile rank *within
+the plotted set*, so mixing indices would make it meaningless.
+
+## `GET /api/sectors` - `GET /api/benchmarks`
 
 Universe metadata, read from the database — never hard-coded (SRS 2.1). Optional
 `include_inactive` (default true).

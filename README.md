@@ -47,7 +47,7 @@ Open <http://localhost:3000>. API docs at <http://localhost:8000/docs>.
 
 ```bash
 # --- tests ---
-cd backend  && .venv/Scripts/python -m pytest -q      # 92 tests
+cd backend  && .venv/Scripts/python -m pytest -q      # 102 tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
 
@@ -86,6 +86,11 @@ refresh and admin endpoints, rate limiting, optional API key.
 **UI** — interactive RRG with quadrant fields, configurable tails, direction arrows, zoom,
 pan, hover, click-to-select; sortable ranking table; historical playback; sector detail
 drawer with trajectory chart; PNG/SVG/CSV/Excel export.
+
+**Sector → stock drill-down** — choose one sector, multi-select its constituents, plot them
+against the benchmark. 153 tickers across 14 sectors, loaded lazily on first use. An
+extension beyond the SRS: see [`docs/SRS_DEVIATIONS.md`](docs/SRS_DEVIATIONS.md) §10,
+including the composition-bias limitation.
 
 ### MVP acceptance criteria (SRS 47)
 
@@ -157,7 +162,7 @@ AAR Project/
 │   │   ├── models.py        # SQLAlchemy schema
 │   │   ├── config.py        # all settings, env-driven
 │   │   └── main.py
-│   ├── tests/               # 92 tests
+│   ├── tests/               # 102 tests
 │   ├── scripts/ingest.py    # CLI data loader
 │   └── config/nse_holidays.json
 ├── frontend/

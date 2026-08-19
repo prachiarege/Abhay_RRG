@@ -3,6 +3,7 @@
 import type {
   AppConfig,
   BenchmarkMeta,
+  ConstituentsResponse,
   ControlState,
   DatesResponse,
   HealthResponse,
@@ -13,6 +14,14 @@ import type {
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") ?? "http://localhost:8000";
+
+/** Thrown when a request was deliberately superseded. Callers should ignore it. */
+export class AbortedError extends Error {
+  constructor() {
+    super("request superseded");
+    this.name = "AbortedError";
+  }
+}
 
 /** Error carrying the backend's own message, so the UI can show something actionable. */
 export class ApiError extends Error {
@@ -33,7 +42,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       headers: { Accept: "application/json", ...(init?.headers ?? {}) },
       cache: "no-store",
     });
-  } catch {
+  } catch (exc) {
+    // A superseded request is not a failure. Distinguishing it matters: without an abort
+    // the browser still sends every keystroke's worth of requests and the single-worker
+    // backend chews through all of them in order, so the UI sits on a stale answer while
+    // work it no longer needs completes ahead of the one it is waiting for.
+    if (exc instanceof DOMException && exc.name === "AbortError") {
+      throw new AbortedError();
+    }
     // A network-level failure means the API is unreachable, which is a different
     // problem from a 4xx and deserves different wording.
     throw new ApiError(
@@ -68,7 +84,16 @@ export function rrgParams(state: ControlState, overrides: Record<string, string>
     smoothing_method: state.smoothingMethod,
     include_partial: String(state.includePartial),
   });
-  if (state.sectors.length > 0) params.set("sectors", state.sectors.join(","));
+  // At stock level the `sectors` parameter carries the selected TICKERS, and `sector`
+  // names the index being drilled into. The backend distinguishes them by `level`.
+  if (state.level === "stock" && state.drillSector) {
+    params.set("level", "stock");
+    params.set("sector", state.drillSector);
+    const picked = state.stocksBySector[state.drillSector] ?? [];
+    if (picked.length > 0) params.set("sectors", picked.join(","));
+  } else if (state.sectors.length > 0) {
+    params.set("sectors", state.sectors.join(","));
+  }
   if (state.asOf) params.set("as_of", state.asOf);
   for (const [key, value] of Object.entries(overrides)) params.set(key, value);
   return params;
@@ -80,14 +105,21 @@ export const api = {
   sectors: () => request<SectorMeta[]>("/api/sectors"),
   benchmarks: () => request<BenchmarkMeta[]>("/api/benchmarks"),
 
-  rrg: (state: ControlState) => request<RRGResponse>(`/api/rrg?${rrgParams(state)}`),
+  rrg: (state: ControlState, signal?: AbortSignal) =>
+    request<RRGResponse>(`/api/rrg?${rrgParams(state)}`, { signal }),
 
   /** Playback dates. `as_of` is deliberately excluded: the full timeline never changes. */
-  dates: (state: ControlState) => {
+  dates: (state: ControlState, signal?: AbortSignal) => {
     const params = rrgParams(state);
     params.delete("as_of");
-    return request<DatesResponse>(`/api/rrg/dates?${params}`);
+    return request<DatesResponse>(`/api/rrg/dates?${params}`, { signal });
   },
+
+  constituents: (sector: string, signal?: AbortSignal) =>
+    request<ConstituentsResponse>(
+      `/api/sectors/${encodeURIComponent(sector)}/constituents`,
+      { signal },
+    ),
 
   sectorDetail: (symbol: string, state: ControlState) =>
     request<SectorDetail>(

@@ -297,6 +297,114 @@ def last_ingestion(session: Session) -> dict | None:
     }
 
 
+def refresh_sector_stocks(
+    session: Session,
+    sector_symbol: str,
+    provider: DataProvider | None = None,
+    start: date | None = None,
+    only_missing: bool = True,
+    trigger: str = "drilldown",
+) -> IngestionResult:
+    """Fetch price history for one sector's constituents.
+
+    Called lazily the first time a user drills into a sector, rather than downloading every
+    constituent of every sector up front. There are roughly 180 memberships across the
+    universe; fetching them all would turn the desktop app's two-minute first run into
+    something closer to ten, to load data for sectors the user may never open.
+
+    A stock the provider cannot serve is marked `data_available = False`, so subsequent
+    refreshes skip it instead of retrying a symbol that does not exist.
+
+    Args:
+        only_missing: skip stocks that already have stored prices. Set False to force a
+            re-fetch of the whole sector.
+    """
+    from ..models import Stock
+
+    provider = provider or get_provider()
+
+    members = list(
+        session.scalars(
+            select(Stock)
+            .where(Stock.sector_symbol == sector_symbol, Stock.active.is_(True))
+            .order_by(Stock.sort_order)
+        )
+    )
+    if not members:
+        raise ValueError(f"no constituents recorded for {sector_symbol}")
+
+    if only_missing:
+        existing = {
+            row[0]
+            for row in session.execute(
+                select(PriceData.symbol).where(
+                    PriceData.symbol.in_([m.symbol for m in members])
+                ).distinct()
+            ).all()
+        }
+        pending = [m for m in members if m.symbol not in existing and m.data_available]
+    else:
+        pending = [m for m in members if m.data_available]
+
+    result = IngestionResult(
+        provider=provider.name,
+        trigger=trigger,
+        started_at=datetime.now(timezone.utc),
+        requested=[m.symbol for m in pending],
+    )
+
+    if not pending:
+        result.finished_at = datetime.now(timezone.utc)
+        return result
+
+    logger.info(
+        "fetching %d constituents of %s from %s",
+        len(pending),
+        sector_symbol,
+        provider.name,
+    )
+
+    fetched, errors = provider.fetch_many(
+        {m.symbol: m.provider_symbol for m in pending}, start=start
+    )
+    result.failed.update(errors)
+
+    by_symbol = {m.symbol: m for m in pending}
+    for symbol, message in errors.items():
+        logger.warning("no data for %s: %s", symbol, message)
+        row = by_symbol.get(symbol)
+        if row is not None:
+            # Remember the failure so the next refresh does not retry a dead symbol.
+            row.data_available = False
+
+    for symbol, payload in fetched.items():
+        report = validate_price_series(payload.close, symbol)
+        result.reports[symbol] = report
+        if not report.ok:
+            result.failed[symbol] = "validation failed"
+            continue
+        try:
+            result.rows_written += _upsert(session, _frame_to_rows(symbol, payload))
+            session.commit()
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            logger.exception("failed storing %s", symbol)
+            result.failed[symbol] = f"storage error: {exc}"
+            continue
+        result.succeeded.append(symbol)
+
+    session.commit()
+    result.finished_at = datetime.now(timezone.utc)
+    logger.info(
+        "constituents of %s: %d/%d fetched, %d rows",
+        sector_symbol,
+        len(result.succeeded),
+        len(result.requested),
+        result.rows_written,
+    )
+    return result
+
+
 def universe(session: Session) -> tuple[list[Sector], list[Benchmark]]:
     sectors = list(
         session.scalars(

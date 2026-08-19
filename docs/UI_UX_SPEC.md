@@ -167,9 +167,49 @@ SRS 52.4 scopes acceptance to desktop. The rail narrows at 1100px and the layout
 below 860px so nothing breaks, but a genuine mobile experience for a dense analytical chart
 is a separate design problem and is not claimed here.
 
+
 ---
 
-## 9. Known UI gaps
+## 10. Sector to stock drill-down
+
+A **Plot** segmented control at the top of the rail switches between *Sectors* and *Stocks in
+a sector*. In stock mode the rail shows a single-select sector dropdown, then a checkbox list
+of that sector's constituents.
+
+Decisions worth recording:
+
+- **The sector is single-select, deliberately.** Constituents of two different indices share
+  no meaningful peer group, and the rotation score is a percentile rank *within the plotted
+  set* - mixing indices would silently make it meaningless. One index at a time keeps the
+  comparison honest.
+- **Selection is remembered per sector** (`stocksBySector`), so switching away and back
+  restores what you had chosen rather than resetting to all.
+- **All usable constituents are selected on first open.** Landing on an empty chart and
+  having to tick boxes before seeing anything is a worse first impression than a busy chart
+  you can thin out.
+- **Constituent tickers are the chart labels**, not abbreviated company names. The NSE ticker
+  is already the shortest unambiguous identifier and is what traders read; the full company
+  name lives in the tooltip and the row title.
+- **The membership snapshot date is shown** under the picker, with a note that historical
+  views use today's members. The UI does not imply it reconstructed past index composition.
+- **A first drill-down states what is happening.** Prices load lazily, so the overlay reads
+  "Downloading constituent price history..." rather than the generic "Calculating...", and
+  the picker warns how many stocks have no data yet.
+- **Stocks the provider cannot serve stay visible**, greyed with an "n/a" tag and a tooltip
+  reason. They are genuinely in the index; hiding them would misrepresent its composition.
+
+### Request cancellation
+
+Ticking several boxes quickly used to leave the chart wedged on a stale answer. The cause was
+that superseded fetches were only ignored in JavaScript, never aborted - so the browser still
+sent every one and the single-worker backend processed them all in order, with the request the
+UI was actually waiting on stuck at the back of the queue. All three data effects now use
+`AbortController`, so superseding a request cancels it. This matters anywhere state changes in
+bursts: the checkbox list, the parameter number fields, and the playback scrubber.
+
+---
+
+## 11. Known UI gaps
 
 - **Label collision.** SRS 10 asks that arrows "not overlap excessively", which is not
   testable as written. Labels are offset and selection emphasises one sector, but there is

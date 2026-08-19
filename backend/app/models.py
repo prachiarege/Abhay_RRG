@@ -82,6 +82,47 @@ class Benchmark(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Stock(Base):
+    """An index constituent — one row per (sector, stock) membership.
+
+    A company belonging to several indices gets several rows: HDFCBANK is in NIFTY Bank,
+    NIFTY Financial Services and NIFTY Private Bank. Membership is the fact recorded here,
+    not the company, which keeps "which stocks are in this sector" a single indexed lookup.
+
+    `as_of` dates the membership snapshot. See app/constituents.py for why that matters:
+    index composition changes, so a stock-level historical view built from a current
+    snapshot carries composition bias and the UI must be able to say which snapshot it used.
+    """
+
+    __tablename__ = "stocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    company_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    sector_symbol: Mapped[str] = mapped_column(
+        String(64), ForeignKey("sectors.symbol"), nullable=False
+    )
+    provider_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(16), default="NSE", nullable=False)
+    color: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Set false once a provider has been asked for this symbol and had nothing, so repeat
+    # refreshes stop wasting requests on it.
+    data_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("sector_symbol", "symbol", name="uq_stock_membership"),
+        Index("ix_stock_sector", "sector_symbol"),
+        Index("ix_stock_symbol", "symbol"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<Stock {self.symbol} in {self.sector_symbol}>"
+
+
 class PriceData(Base):
     __tablename__ = "price_data"
 

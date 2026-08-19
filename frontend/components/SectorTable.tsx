@@ -30,7 +30,7 @@ interface Props {
 }
 
 const COLUMNS: { key: SortKey; label: string; title?: string }[] = [
-  { key: "name", label: "Sector" },
+  { key: "name", label: "Name" },
   { key: "rs_ratio", label: "RS-Ratio" },
   { key: "rs_momentum", label: "RS-Mom" },
   { key: "quadrant", label: "Quadrant" },
@@ -95,10 +95,11 @@ export function SectorTable({ data, selected, onSelect }: Props) {
   return (
     <section className="table-panel">
       <div className="table-head">
-        <h3>Sector ranking</h3>
+        <h3>{data.level === "stock" ? "Stock ranking" : "Sector ranking"}</h3>
         <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
-          {rows.length} sectors · {data.benchmark_name} · {data.frequency} ·{" "}
-          {data.date ?? "–"}
+          {rows.length} {data.level === "stock" ? "stocks" : "sectors"}
+          {data.level === "stock" && data.sector ? ` in ${data.sector}` : ""} ·{" "}
+          {data.benchmark_name} · {data.frequency} · {data.date ?? "–"}
         </span>
       </div>
 
@@ -140,6 +141,7 @@ export function SectorTable({ data, selected, onSelect }: Props) {
                   key={sector.symbol}
                   className={selected === sector.symbol ? "selected" : ""}
                   onClick={() => onSelect(sector.symbol)}
+                  title={sector.full_name}
                 >
                   <td>
                     <span className="cell-sector">

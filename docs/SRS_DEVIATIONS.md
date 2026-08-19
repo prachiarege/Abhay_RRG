@@ -193,3 +193,58 @@ Postgres-compatible; caching sits behind an interface so Redis drops in.
 in-process cache is per-worker — so the current setup is single-worker only. Moving to
 Postgres plus Redis is a prerequisite for running more than one API worker, not an
 optimisation.
+
+---
+
+## 10. Stock-level drill-down - an extension beyond the SRS
+
+The SRS scopes the product to sector indices throughout (sections 2.1, 17, 47). Drilling from
+a sector into its constituent stocks was requested after the MVP was built, and is therefore
+an **addition to the specification** rather than an implementation of it.
+
+It required no change to the calculation engine: a stock against a benchmark is
+arithmetically identical to a sector against a benchmark. The work was a constituent data
+model, an `Instrument` adapter, and UI. Worth recording because it validates what SRS 50.4
+asked for - the engine takes two price series and knows nothing about what they represent.
+
+### 10.1 Composition bias - the honest limitation
+
+Index membership changes: NSE rebalances, companies demerge, tickers change. A stock-level
+RRG drawn over history from a *current* membership snapshot shows how today's members
+behaved, silently excluding anything since removed. **The historical stock-level view is not
+survivorship-free**, and no static list can make it so.
+
+The application records `as_of` on every membership row, returns it in the API, and states it
+in the UI. Accurate historical work needs dated membership history from a licensed vendor.
+For the actual use case - "which stocks in this sector are leading right now" - a current
+snapshot is the correct input.
+
+### 10.2 What the constituent data is
+
+153 unique tickers across 14 sectors, from NSE index composition as of 2026-08-01. Verified
+against the live provider: **148 of 153 resolve**.
+
+The five that did not were instructive rather than merely broken:
+
+| Ticker | Finding |
+|---|---|
+| `TATAMOTORS` | resolves only as **`TMPV`**, the post-demerger passenger-vehicle entity. Constituent renamed. |
+| `MACROTECH` | ticker renamed to **`LODHA`**. Constituent renamed. |
+| `JBCHEPHARM` | valid but roughly a month stale. Kept; the staleness flag reports it. |
+| `LTIM` | LTIMindtree has no series under any symbol tried. Kept as a member, marked unavailable. |
+| `TV18BRDCST` | no series; `NETWORK18` (also a member) resolves. Kept as a member, marked unavailable. |
+
+Membership is kept even where price data is missing, because membership is a real fact. The
+picker greys those two out with a reason rather than pretending they are not in the index.
+
+Re-seeding **prunes** memberships no longer in the snapshot, so a ticker rename does not
+leave behind a ghost row permanently marked unavailable. Stored prices for a pruned symbol
+are left alone: harmless, and it makes re-adding free.
+
+### 10.3 A side effect worth knowing
+
+The provider's NSE **equity** coverage is markedly better than its NSE sector-**index**
+coverage. Where 7 of 10 sector indices were four weeks stale (see 1.2), the constituent
+series are current. The drill-down is therefore more reliable and fresher than the sector
+view it drills into - backwards from what one would expect, and a further argument for
+section 1's recommendation to replace the data source.

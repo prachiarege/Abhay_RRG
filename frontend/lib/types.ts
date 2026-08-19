@@ -10,6 +10,9 @@ export type Quadrant = "Leading" | "Weakening" | "Lagging" | "Improving";
 
 export type Frequency = "daily" | "weekly";
 
+/** What the chart plots: sector indices, or the constituents of one sector. */
+export type Level = "sector" | "stock";
+
 export type SmoothingMethod = "none" | "sma" | "ema";
 
 export type DirectionCode =
@@ -54,6 +57,33 @@ export interface SectorPoint {
   bars_behind: number | null;
   /** True when this sector's data stops short of the headline date (a real feed gap). */
   is_stale: boolean;
+  level: Level;
+  /** For a stock, the sector it was drilled into from. */
+  parent_sector: string | null;
+  /** Date of the index-membership snapshot this constituent came from. */
+  membership_as_of: string | null;
+}
+
+/** One index constituent, for the drill-down picker. */
+export interface ConstituentStock {
+  symbol: string;
+  name: string;
+  color: string | null;
+  active: boolean;
+  /** False once the provider has been asked and had no series for this stock. */
+  available: boolean;
+  /** Whether prices are already stored, so the UI can warn about a first-load delay. */
+  data_loaded: boolean;
+  latest_date: string | null;
+}
+
+export interface ConstituentsResponse {
+  sector: string;
+  sector_name: string;
+  membership_as_of: string | null;
+  count: number;
+  data_loaded: number;
+  stocks: ConstituentStock[];
 }
 
 export interface UnavailableSector {
@@ -86,6 +116,9 @@ export interface EngineParams {
 export interface RRGResponse {
   benchmark: string;
   benchmark_name: string;
+  level: Level;
+  sector: string | null;
+  membership_as_of: string | null;
   frequency: Frequency;
   date: string | null;
   requested_as_of: string | null;
@@ -210,7 +243,14 @@ export interface ControlState {
   benchmark: string;
   frequency: Frequency;
   tail: number;
+  /** Sector symbols plotted at sector level. */
   sectors: string[];
+  /** "sector" plots indices; "stock" plots one sector's constituents. */
+  level: Level;
+  /** Which sector is drilled into, when level === "stock". */
+  drillSector: string | null;
+  /** Selected constituent tickers, keyed per sector so switching back restores the choice. */
+  stocksBySector: Record<string, string[]>;
   asOf: string | null;
   rsPeriod: number;
   momentumPeriod: number;

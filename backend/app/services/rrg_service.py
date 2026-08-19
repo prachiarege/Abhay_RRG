@@ -23,12 +23,13 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..engine.instruments import Instrument, InstrumentLevel
 from ..engine.params import ENGINE_VERSION, RRGParams
 from ..engine.quadrants import heading_label
 from ..engine.rotation import detect_rotations
 from ..engine.rrg_engine import compute_rrg
 from ..engine.stats import RETURN_WINDOWS, ScoreWeights, relative_returns, rotation_scores
-from ..models import Benchmark, Sector
+from ..models import Benchmark, Sector, Stock
 from .cache import cache_key, get_cache
 from .ingestion import load_close_series
 from .resample import align_to_weekly_grid, to_frequency
@@ -40,15 +41,22 @@ logger = logging.getLogger(__name__)
 class RRGRequest:
     benchmark: str
     frequency: str = "weekly"
+    #: Symbols to plot. Sector symbols when level == "sector", NSE tickers when "stock".
     sectors: tuple[str, ...] = ()
     as_of: date | None = None
     tail_length: int = 10
     params: RRGParams = field(default_factory=RRGParams)
     include_partial: bool = False
+    #: What is being plotted. "stock" requires `sector` to say which index to drill into.
+    level: InstrumentLevel = "sector"
+    #: The sector whose constituents to plot, when level == "stock".
+    sector: str | None = None
 
     def cache_signature(self) -> str:
         return cache_key(
             "rrg",
+            self.level,
+            self.sector,
             self.benchmark,
             self.frequency,
             ",".join(sorted(self.sectors)),
@@ -102,17 +110,135 @@ def _series_for(
     return to_frequency(daily, frequency, include_partial=include_partial)
 
 
+def resolve_instruments(
+    session: Session,
+    request: RRGRequest,
+) -> tuple[list[Instrument], list[dict]]:
+    """Work out what to plot, and what could not be plotted and why.
+
+    Handles both levels. In each case an explicitly requested symbol is looked up
+    regardless of its `active` flag, so an inactive or unknown selection is REPORTED
+    rather than silently dropped — quietly returning fewer series than were asked for
+    reads as a broken chart.
+
+    Returns (instruments, unavailable).
+    """
+    from sqlalchemy import select
+
+    unavailable: list[dict] = []
+
+    if request.level == "stock":
+        if not request.sector:
+            raise ValueError("level=stock requires a sector to drill into")
+
+        sector_row = session.scalar(
+            select(Sector).where(Sector.symbol == request.sector)
+        )
+        if sector_row is None:
+            raise ValueError(f"unknown sector: {request.sector}")
+
+        members = {
+            row.symbol: row
+            for row in session.scalars(
+                select(Stock)
+                .where(Stock.sector_symbol == request.sector)
+                .order_by(Stock.sort_order)
+            )
+        }
+        if not members:
+            raise ValueError(
+                f"no constituents recorded for {request.sector}. "
+                "Seed them with POST /api/admin/seed."
+            )
+
+        # With no explicit selection, consider EVERY member rather than pre-filtering to the
+        # usable ones. The unusable are then reported below instead of vanishing: a sector
+        # whose index has 10 members but plots 9 needs to say which one is missing and why.
+        wanted = request.sectors or tuple(members)
+
+        instruments: list[Instrument] = []
+        for symbol in wanted:
+            row = members.get(symbol)
+            if row is None:
+                unavailable.append(
+                    {
+                        "symbol": symbol,
+                        "name": symbol,
+                        "reason": f"not a constituent of {request.sector}",
+                    }
+                )
+            elif not row.active:
+                unavailable.append(
+                    {
+                        "symbol": row.symbol,
+                        "name": row.company_name,
+                        "reason": "constituent marked inactive",
+                    }
+                )
+            elif not row.data_available:
+                unavailable.append(
+                    {
+                        "symbol": row.symbol,
+                        "name": row.company_name,
+                        "reason": "the configured data provider has no series for this stock",
+                    }
+                )
+            else:
+                instruments.append(Instrument.from_stock(row))
+        instruments.sort(key=lambda i: i.sort_order)
+        return instruments, unavailable
+
+    # --- sector level ---------------------------------------------------------------
+    if request.sectors:
+        found = {
+            row.symbol: row
+            for row in session.scalars(
+                select(Sector).where(Sector.symbol.in_(request.sectors))
+            )
+        }
+        instruments = []
+        for symbol in request.sectors:
+            row = found.get(symbol)
+            if row is None:
+                unavailable.append(
+                    {"symbol": symbol, "name": symbol, "reason": "unknown sector"}
+                )
+            elif not row.active:
+                unavailable.append(
+                    {
+                        "symbol": row.symbol,
+                        "name": row.display_name,
+                        "reason": "sector is inactive for the configured data provider",
+                    }
+                )
+            else:
+                instruments.append(Instrument.from_sector(row))
+        instruments.sort(key=lambda i: i.sort_order)
+        return instruments, unavailable
+
+    rows = session.scalars(
+        select(Sector)
+        .where(Sector.active.is_(True), Sector.is_default.is_(True))
+        .order_by(Sector.sort_order)
+    )
+    return [Instrument.from_sector(row) for row in rows], unavailable
+
+
 def build_rrg(
     session: Session,
     request: RRGRequest,
-    sector_rows: list[Sector] | None = None,
+    instruments: list[Instrument] | None = None,
     benchmark_row: Benchmark | None = None,
     use_cache: bool = True,
 ) -> dict:
     """Assemble the full RRG payload for one request.
 
+    Works identically for sector-level and stock-level requests: the engine only ever sees
+    two price series, so drilling into a sector's constituents changes what is looked up,
+    not how anything is calculated.
+
     Returns a dict shaped per SRS 34, extended with the diagnostics the UI needs
-    (warm-up requirements, per-sector failures, score caveats).
+    (warm-up requirements, per-series failures, staleness, score caveats).
     """
     cache = get_cache()
     signature = request.cache_signature()
@@ -130,52 +256,17 @@ def build_rrg(
     if benchmark_row is None:
         raise ValueError(f"unknown benchmark: {request.benchmark}")
 
-    # Sectors the caller asked for but which cannot be plotted. Populated here for
-    # explicitly-requested symbols and extended below for data-level failures, so the
-    # response always accounts for every symbol the caller named.
-    unavailable: list[dict] = []
+    if instruments is None:
+        instruments, unavailable = resolve_instruments(session, request)
+    else:
+        unavailable = []
 
-    if sector_rows is None:
-        if request.sectors:
-            # An explicitly requested symbol is looked up regardless of `active`, so that
-            # an inactive or unknown selection is REPORTED rather than silently dropped.
-            # Quietly returning fewer sectors than were asked for reads as a broken chart.
-            found = {
-                row.symbol: row
-                for row in session.scalars(
-                    select(Sector).where(Sector.symbol.in_(request.sectors))
-                )
-            }
-            sector_rows = []
-            for symbol in request.sectors:
-                row = found.get(symbol)
-                if row is None:
-                    unavailable.append(
-                        {"symbol": symbol, "name": symbol, "reason": "unknown sector"}
-                    )
-                elif not row.active:
-                    unavailable.append(
-                        {
-                            "symbol": row.symbol,
-                            "name": row.display_name,
-                            "reason": "sector is inactive for the configured data provider",
-                        }
-                    )
-                else:
-                    sector_rows.append(row)
-            sector_rows.sort(key=lambda s: s.sort_order)
-        else:
-            sector_rows = list(
-                session.scalars(
-                    select(Sector)
-                    .where(Sector.active.is_(True), Sector.is_default.is_(True))
-                    .order_by(Sector.sort_order)
-                )
-            )
-
-    if not sector_rows:
+    if not instruments:
         detail = "; ".join(f"{u['symbol']}: {u['reason']}" for u in unavailable)
-        raise ValueError(f"no plottable sectors selected{': ' + detail if detail else ''}")
+        noun = "constituents" if request.level == "stock" else "sectors"
+        raise ValueError(
+            f"no plottable {noun} selected{': ' + detail if detail else ''}"
+        )
 
     benchmark_series = _series_for(
         session,
@@ -207,10 +298,10 @@ def build_rrg(
     frames: dict[str, pd.DataFrame] = {}
     as_of_effective: pd.Timestamp | None = None
 
-    for sector in sector_rows:
+    for instrument in instruments:
         sector_series = _series_for(
             session,
-            sector.symbol,
+            instrument.symbol,
             request.frequency,
             request.as_of,
             request.include_partial,
@@ -219,8 +310,8 @@ def build_rrg(
         if sector_series.empty:
             unavailable.append(
                 {
-                    "symbol": sector.symbol,
-                    "name": sector.display_name,
+                    "symbol": instrument.symbol,
+                    "name": instrument.display_name,
                     "reason": "no stored price data",
                 }
             )
@@ -229,12 +320,12 @@ def build_rrg(
         try:
             frame = compute_rrg(sector_series, benchmark_series, params)
         except Exception as exc:  # noqa: BLE001
-            # One sector's failure must not take down the chart (SRS 46).
-            logger.exception("RRG computation failed for %s", sector.symbol)
+            # One series failing must not take down the chart (SRS 46).
+            logger.exception("RRG computation failed for %s", instrument.symbol)
             unavailable.append(
                 {
-                    "symbol": sector.symbol,
-                    "name": sector.display_name,
+                    "symbol": instrument.symbol,
+                    "name": instrument.display_name,
                     "reason": f"calculation error: {exc}",
                 }
             )
@@ -244,8 +335,8 @@ def build_rrg(
         if valid.empty:
             unavailable.append(
                 {
-                    "symbol": sector.symbol,
-                    "name": sector.display_name,
+                    "symbol": instrument.symbol,
+                    "name": instrument.display_name,
                     "reason": (
                         f"insufficient overlapping history "
                         f"({len(sector_series)} bars, needs {params.min_bars})"
@@ -254,7 +345,7 @@ def build_rrg(
             )
             continue
 
-        frames[sector.symbol] = frame
+        frames[instrument.symbol] = frame
         tail = valid.tail(request.tail_length)
         head = tail.iloc[-1]
         head_date = pd.Timestamp(tail.index[-1])
@@ -272,7 +363,7 @@ def build_rrg(
                 valid["rs_momentum"].iloc[-1] - valid["rs_momentum"].iloc[-2]
             )
 
-        latest_components[sector.symbol] = {
+        latest_components[instrument.symbol] = {
             "rs_ratio": float(head["rs_ratio"]),
             "rs_momentum": float(head["rs_momentum"]),
             "momentum_change": momentum_change,
@@ -284,11 +375,14 @@ def build_rrg(
 
         sectors_payload.append(
             {
-                "symbol": sector.symbol,
-                "name": sector.display_name,
-                "short_name": sector.short_name,
-                "full_name": sector.sector_name,
-                "color": sector.color,
+                "symbol": instrument.symbol,
+                "name": instrument.display_name,
+                "short_name": instrument.short_name,
+                "full_name": instrument.full_name,
+                "color": instrument.color,
+                "level": instrument.level,
+                "parent_sector": instrument.parent_sector,
+                "membership_as_of": instrument.as_of,
                 "rs_ratio": _rounded(head["rs_ratio"]),
                 "rs_momentum": _rounded(head["rs_momentum"]),
                 "quadrant": head["quadrant"],
@@ -312,10 +406,11 @@ def build_rrg(
 
     if not sectors_payload:
         raise InsufficientHistory(
-            "no sector produced a valid RRG point. "
+            f"no {'constituent' if request.level == 'stock' else 'sector'} "
+            "produced a valid RRG point. "
             + (
                 "; ".join(f"{u['symbol']}: {u['reason']}" for u in unavailable[:5])
-                or "no sectors selected"
+                or "nothing selected"
             )
         )
 
@@ -356,6 +451,14 @@ def build_rrg(
     payload = {
         "benchmark": benchmark_row.symbol,
         "benchmark_name": benchmark_row.display_name,
+        "level": request.level,
+        "sector": request.sector,
+        # Which membership snapshot the constituents came from, so the UI can state it.
+        # See app/constituents.py: a current snapshot applied to history carries
+        # composition bias, and hiding that would be dishonest.
+        "membership_as_of": next(
+            (i.as_of for i in instruments if i.as_of), None
+        ),
         "frequency": request.frequency,
         "date": as_of_effective.strftime("%Y-%m-%d") if as_of_effective is not None else None,
         "requested_as_of": request.as_of.isoformat() if request.as_of else None,

@@ -22,6 +22,7 @@ from .api.routes import router
 from .config import BASE_DIR, get_settings
 from .db import init_db, session_scope
 from .engine.params import ENGINE_VERSION
+from .constituents import seed_constituents
 from .seed import seed_universe
 
 logging.basicConfig(
@@ -39,6 +40,8 @@ async def lifespan(app: FastAPI):
     init_db()
     with session_scope() as session:
         seed_universe(session)
+        session.commit()
+        seed_constituents(session)
 
     scheduler = None
     if settings.auto_refresh_enabled:

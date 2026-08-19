@@ -16,11 +16,12 @@ import { PlaybackBar } from "@/components/PlaybackBar";
 import { RRGChart, type RRGChartHandle } from "@/components/RRGChart";
 import { SectorDetailDrawer } from "@/components/SectorDetailDrawer";
 import { SectorTable } from "@/components/SectorTable";
-import { ApiError, api } from "@/lib/api";
+import { AbortedError, ApiError, api } from "@/lib/api";
 import { QUADRANT_ORDER, QUADRANT_STYLE } from "@/lib/format";
 import type {
   AppConfig,
   BenchmarkMeta,
+  ConstituentsResponse,
   ControlState,
   HealthResponse,
   RRGResponse,
@@ -32,6 +33,9 @@ const INITIAL_STATE: ControlState = {
   frequency: "weekly",
   tail: 10,
   sectors: [],
+  level: "sector",
+  drillSector: null,
+  stocksBySector: {},
   asOf: null,
   rsPeriod: 14,
   momentumPeriod: 10,
@@ -61,6 +65,9 @@ export default function Page() {
   const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [drawerSymbol, setDrawerSymbol] = useState<string | null>(null);
+  const [constituents, setConstituents] = useState<ConstituentsResponse | null>(null);
+  const [constituentsLoading, setConstituentsLoading] = useState(false);
+  const [constituentsError, setConstituentsError] = useState<string | null>(null);
 
   const chartRef = useRef<RRGChartHandle | null>(null);
 
@@ -70,6 +77,8 @@ export default function Page() {
       // Changing anything that alters the timeline invalidates the selected date: a date
       // valid for weekly bars is usually not a daily bar, and vice versa.
       if (
+        update.level !== undefined ||
+        update.drillSector !== undefined ||
         update.frequency !== undefined ||
         update.benchmark !== undefined ||
         update.rsPeriod !== undefined ||
@@ -124,34 +133,41 @@ export default function Page() {
     };
   }, []);
 
-  const ready = state.sectors.length > 0;
+  const ready =
+    state.level === "stock"
+      ? Boolean(state.drillSector) &&
+        (state.stocksBySector[state.drillSector ?? ""]?.length ?? 0) > 0
+      : state.sectors.length > 0;
 
   // Chart data. Debounced, and late responses from superseded requests are discarded.
   useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
+    if (!ready) {
+      setLoading(false);
+      setData(null);
+      return;
+    }
+    const controller = new AbortController();
     setLoading(true);
 
     const timer = window.setTimeout(() => {
       api
-        .rrg(state)
+        .rrg(state, controller.signal)
         .then((result) => {
-          if (cancelled) return;
           setData(result);
           setError(null);
+          setLoading(false);
         })
         .catch((exc: Error) => {
-          if (cancelled) return;
+          // A superseded request leaves loading alone: the run that replaced it owns it.
+          if (exc instanceof AbortedError) return;
           setError(exc instanceof ApiError ? exc.message : String(exc));
           setData(null);
-        })
-        .finally(() => {
-          if (!cancelled) setLoading(false);
+          setLoading(false);
         });
     }, REQUEST_DEBOUNCE_MS);
 
     return () => {
-      cancelled = true;
+      controller.abort();
       window.clearTimeout(timer);
     };
   }, [state, ready]);
@@ -169,23 +185,62 @@ export default function Page() {
 
   useEffect(() => {
     if (!ready) return;
-    let cancelled = false;
+    const controller = new AbortController();
 
     api
-      .dates(state)
-      .then((result) => {
-        if (!cancelled) setDates(result.dates);
-      })
-      .catch(() => {
-        if (!cancelled) setDates([]);
+      .dates(state, controller.signal)
+      .then((result) => setDates(result.dates))
+      .catch((exc: Error) => {
+        if (exc instanceof AbortedError) return;
+        setDates([]);
       });
 
     return () => {
-      cancelled = true;
+      controller.abort();
     };
     // Intentionally keyed on the timeline inputs only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [timelineKey, ready]);
+
+  // Constituents for the drilled-into sector. Selection defaults to every usable stock the
+  // first time a sector is opened, then whatever the user last chose for that sector.
+  useEffect(() => {
+    if (state.level !== "stock" || !state.drillSector) {
+      setConstituents(null);
+      setConstituentsError(null);
+      return;
+    }
+    const sector = state.drillSector;
+    const controller = new AbortController();
+    setConstituentsLoading(true);
+    setConstituentsError(null);
+
+    api
+      .constituents(sector, controller.signal)
+      .then((result) => {
+        setConstituents(result);
+        setState((prev) => {
+          if (prev.stocksBySector[sector]?.length) return prev;
+          const usable = result.stocks
+            .filter((s) => s.active && s.available)
+            .map((s) => s.symbol);
+          return {
+            ...prev,
+            stocksBySector: { ...prev.stocksBySector, [sector]: usable },
+          };
+        });
+      })
+      .catch((exc: Error) => {
+        if (exc instanceof AbortedError) return;
+        setConstituentsError(exc.message);
+        setConstituents(null);
+      })
+      .finally(() => setConstituentsLoading(false));
+
+    return () => {
+      controller.abort();
+    };
+  }, [state.level, state.drillSector]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -249,6 +304,9 @@ export default function Page() {
           sectors={sectors}
           benchmarks={benchmarks}
           warmupBars={data?.warmup_bars ?? null}
+          constituents={constituents}
+          constituentsLoading={constituentsLoading}
+          constituentsError={constituentsError}
           onChange={patch}
         />
 
@@ -326,24 +384,42 @@ export default function Page() {
                 onSelect={handleSelect}
               />
 
-              {(loading || error) && (
+              {(loading || error || !ready) && (
                 <div className="chart-overlay">
                   {error ? (
                     <div className="error-box">
                       <h4>Cannot draw the graph</h4>
                       <p>{error}</p>
                     </div>
+                  ) : !ready ? (
+                    <div style={{ color: "var(--text-muted)", fontSize: 12, maxWidth: 340 }}>
+                      {state.level === "stock" && !state.drillSector
+                        ? "Choose a sector in the panel on the left to list its constituent stocks."
+                        : "Select at least one series to plot."}
+                    </div>
                   ) : (
                     <div>
                       <div className="spinner" />
                       <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
-                        Calculating…
+                        {state.level === "stock" &&
+                        constituents &&
+                        constituents.data_loaded < constituents.count
+                          ? "Downloading constituent price history…"
+                          : "Calculating…"}
                       </div>
                     </div>
                   )}
                 </div>
               )}
             </div>
+
+            {data && data.level === "stock" && data.membership_as_of && (
+              <p className="footnote" style={{ margin: "6px 12px 0" }}>
+                Plotting {data.sectors.length} constituents of {data.sector} using index
+                membership as of {data.membership_as_of}. Historical positions use today&apos;s
+                members, so removed constituents are absent — see the docs on composition bias.
+              </p>
+            )}
 
             {data && data.sectors.some((s) => s.is_stale) && (
               <div className="notice" style={{ margin: "6px 12px 0" }}>

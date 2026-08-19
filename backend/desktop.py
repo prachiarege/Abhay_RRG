@@ -94,12 +94,15 @@ def ensure_data() -> tuple[bool, str]:
 
     from app.db import init_db, session_scope
     from app.models import PriceData
+    from app.constituents import seed_constituents
     from app.seed import seed_universe
 
     init_db()
 
     with session_scope() as session:
         seed_universe(session)
+        session.commit()
+        seed_constituents(session)
         session.commit()
         rows = session.scalar(select(func.count()).select_from(PriceData)) or 0
 

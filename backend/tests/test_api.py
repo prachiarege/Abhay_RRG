@@ -328,3 +328,152 @@ def test_cache_hit_is_recorded(client: TestClient):
     client.get("/api/rrg", params=params)
     after = client.get("/api/health").json()["cache"]["hits"]
     assert after > before
+
+
+# ------------------------------------------------------------------- constituent drill-down
+
+
+def _write_stock_csvs(symbols: list[str]) -> None:
+    """Synthetic daily series for constituent tickers, so drill-down needs no network.
+
+    Files are named after the PROVIDER symbol ("ITC.NS.csv"), not the canonical NSE symbol,
+    because that is what CSVProvider looks up.
+    """
+    from app.constituents import provider_symbol_for
+
+    index = pd.bdate_range(end="2026-08-14", periods=BARS, name="date")
+    for position, canonical in enumerate(symbols):
+        symbol = provider_symbol_for(canonical)
+        generator = np.random.default_rng(5000 + position)
+        shocks = generator.normal(loc=0.0002 * (position % 5 - 2), scale=0.013, size=BARS)
+        cycle = 0.10 * np.sin(np.linspace(0, 5 * np.pi, BARS) + position * 0.7)
+        close = 500.0 * np.exp(np.cumsum(shocks) + cycle)
+        pd.DataFrame(
+            {
+                "Date": index.strftime("%Y-%m-%d"),
+                "Open": close,
+                "High": close * 1.01,
+                "Low": close * 0.99,
+                "Close": close,
+                "Volume": 500_000,
+            }
+        ).to_csv(_CSV_DIR / f"{symbol}.csv", index=False)
+
+
+@pytest.fixture(scope="module")
+def fmcg_constituents(client: TestClient) -> list[str]:
+    """Give the FMCG constituents CSV data and return their tickers."""
+    from app.constituents import CONSTITUENTS
+
+    symbols = [symbol for symbol, _name in CONSTITUENTS["NIFTY_FMCG"]]
+    _write_stock_csvs(symbols)
+    response = client.post("/api/sectors/NIFTY_FMCG/constituents/refresh")
+    assert response.status_code == 200, response.text
+    return symbols
+
+
+def test_constituents_listed(client: TestClient):
+    body = client.get("/api/sectors/NIFTY_FMCG/constituents").json()
+    assert body["sector"] == "NIFTY_FMCG"
+    assert body["count"] == 15
+    assert body["membership_as_of"] == "2026-08-01"
+    assert {"ITC", "HINDUNILVR", "NESTLEIND"} <= {s["symbol"] for s in body["stocks"]}
+    assert all("data_loaded" in s for s in body["stocks"])
+
+
+def test_constituents_unknown_sector(client: TestClient):
+    assert client.get("/api/sectors/NOPE/constituents").status_code == 404
+
+
+def test_stock_level_rrg(client: TestClient, fmcg_constituents: list[str]):
+    response = client.get(
+        "/api/rrg", params={"level": "stock", "sector": "NIFTY_FMCG"}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["level"] == "stock"
+    assert body["sector"] == "NIFTY_FMCG"
+    assert body["membership_as_of"] == "2026-08-01"
+    assert len(body["sectors"]) == len(fmcg_constituents)
+
+    for stock in body["sectors"]:
+        assert stock["level"] == "stock"
+        assert stock["parent_sector"] == "NIFTY_FMCG"
+        assert stock["quadrant"] in ("Leading", "Weakening", "Lagging", "Improving")
+        assert stock["rs_ratio"] is not None
+        assert len(stock["tail"]) == 10
+
+
+def test_stock_subset_selection(client: TestClient, fmcg_constituents: list[str]):
+    """The checkbox selection must be honoured exactly."""
+    picked = ["ITC", "HINDUNILVR", "NESTLEIND"]
+    body = client.get(
+        "/api/rrg",
+        params={"level": "stock", "sector": "NIFTY_FMCG", "sectors": ",".join(picked)},
+    ).json()
+    assert [s["symbol"] for s in body["sectors"]] == picked
+
+
+def test_stock_not_in_sector_is_reported(client: TestClient, fmcg_constituents: list[str]):
+    """Asking for a stock outside the drilled sector reports it rather than dropping it."""
+    body = client.get(
+        "/api/rrg",
+        params={"level": "stock", "sector": "NIFTY_FMCG", "sectors": "ITC,TCS"},
+    ).json()
+    assert [s["symbol"] for s in body["sectors"]] == ["ITC"]
+    assert body["unavailable"][0]["symbol"] == "TCS"
+    assert "not a constituent" in body["unavailable"][0]["reason"]
+
+
+def test_stock_level_requires_a_sector(client: TestClient):
+    response = client.get("/api/rrg", params={"level": "stock"})
+    assert response.status_code == 400
+    assert "requires a sector" in response.json()["detail"]
+
+
+def test_invalid_level_rejected(client: TestClient):
+    assert client.get("/api/rrg", params={"level": "planet"}).status_code == 422
+
+
+def test_sector_level_unaffected_by_drilldown(client: TestClient, fmcg_constituents: list[str]):
+    """The default sector view must be identical whether or not stocks have been loaded."""
+    body = client.get("/api/rrg").json()
+    assert body["level"] == "sector"
+    assert body["sector"] is None
+    assert len(body["sectors"]) == 10
+    assert all(s["level"] == "sector" for s in body["sectors"])
+
+
+def test_stock_and_sector_payloads_are_cached_separately(
+    client: TestClient, fmcg_constituents: list[str]
+):
+    """A shared cache key between levels would serve stocks for a sector request."""
+    client.post("/api/admin/cache/clear")
+    sector_body = client.get("/api/rrg").json()
+    stock_body = client.get(
+        "/api/rrg", params={"level": "stock", "sector": "NIFTY_FMCG"}
+    ).json()
+    assert sector_body["level"] == "sector"
+    assert stock_body["level"] == "stock"
+    assert {s["symbol"] for s in sector_body["sectors"]} != {
+        s["symbol"] for s in stock_body["sectors"]
+    }
+
+
+def test_stock_export_matches_screen(client: TestClient, fmcg_constituents: list[str]):
+    params = {"level": "stock", "sector": "NIFTY_FMCG"}
+    payload = client.get("/api/rrg", params=params).json()
+    response = client.get("/api/export/rrg.csv", params=params)
+    assert response.status_code == 200
+
+    import csv as csv_module
+    import io
+
+    rows = list(csv_module.DictReader(io.StringIO(response.text)))
+    for stock in payload["sectors"]:
+        head = next(
+            r for r in rows if r["symbol"] == stock["symbol"] and r["is_latest"] == "True"
+        )
+        assert float(head["rs_ratio"]) == stock["rs_ratio"]
+        assert float(head["rs_momentum"]) == stock["rs_momentum"]

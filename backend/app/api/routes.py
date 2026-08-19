@@ -20,8 +20,9 @@ from ..config import Settings, get_settings
 from ..db import get_session
 from ..engine.params import ENGINE_VERSION
 from ..engine.quadrants import QUADRANTS
-from ..models import Benchmark, RotationEventRow, Sector
+from ..models import Benchmark, PriceData, RotationEventRow, Sector
 from ..schemas import RefreshRequest
+from ..constituents import seed_constituents
 from ..seed import UNAVAILABLE_PREFIX, seed_universe
 from ..services import ingestion
 from ..services.cache import get_cache
@@ -136,6 +137,93 @@ def list_benchmarks(
     ]
 
 
+@router.get("/sectors/{symbol}/constituents", tags=["meta"])
+def list_constituents(
+    symbol: str,
+    session: Session = Depends(get_session),
+) -> dict:
+    """The stocks making up one sector index, for the drill-down picker.
+
+    `data_loaded` tells the client whether prices are already stored. On a first drill-down
+    they will not be, and the RRG request will fetch them — which takes a few seconds and is
+    worth showing a progress state for.
+    """
+    from sqlalchemy import func
+
+    from ..models import Stock
+
+    sector = session.scalar(select(Sector).where(Sector.symbol == symbol))
+    if sector is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"unknown sector: {symbol}"
+        )
+
+    members = list(
+        session.scalars(
+            select(Stock).where(Stock.sector_symbol == symbol).order_by(Stock.sort_order)
+        )
+    )
+    if not members:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"no constituents recorded for {symbol}. "
+                "Seed them with POST /api/admin/seed."
+            ),
+        )
+
+    stored = {
+        row[0]: row[1]
+        for row in session.execute(
+            select(PriceData.symbol, func.max(PriceData.date))
+            .where(PriceData.symbol.in_([m.symbol for m in members]))
+            .group_by(PriceData.symbol)
+        ).all()
+    }
+
+    return {
+        "sector": sector.symbol,
+        "sector_name": sector.display_name,
+        # The membership snapshot date. Index composition changes over time, so a
+        # stock-level view of history built from a current snapshot carries composition
+        # bias; the UI states this rather than implying survivorship-free history.
+        "membership_as_of": members[0].as_of.isoformat() if members[0].as_of else None,
+        "count": len(members),
+        "data_loaded": sum(1 for m in members if m.symbol in stored),
+        "stocks": [
+            {
+                "symbol": m.symbol,
+                "name": m.company_name,
+                "color": m.color,
+                "active": m.active,
+                "available": m.data_available,
+                "data_loaded": m.symbol in stored,
+                "latest_date": stored[m.symbol].isoformat() if m.symbol in stored else None,
+            }
+            for m in members
+        ],
+    }
+
+
+@router.post("/sectors/{symbol}/constituents/refresh", tags=["admin"])
+def refresh_constituents(
+    symbol: str,
+    force: bool = Query(default=False, description="re-fetch stocks that already have data"),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Download price history for a sector's constituents."""
+    try:
+        result = ingestion.refresh_sector_stocks(
+            session, symbol, only_missing=not force, trigger="manual"
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    get_cache().clear("rrg|stock")
+    return result.to_dict()
+
+
 @router.get("/config", tags=["meta"])
 def read_config(settings: Settings = Depends(get_settings)) -> dict:
     """Effective defaults, so the UI never hard-codes them either (SRS 40)."""
@@ -181,7 +269,30 @@ def get_rrg(
     request: RRGRequest = Depends(build_request),
     session: Session = Depends(get_session),
 ) -> dict:
-    """RRG payload for the requested benchmark, frequency, date and parameters."""
+    """RRG payload for the requested benchmark, frequency, date and parameters.
+
+    With `level=stock&sector=<symbol>` this plots that sector's constituents instead of the
+    sector indices. Constituent prices are fetched on first use, so the initial drill-down
+    into a sector takes several seconds while roughly 10-20 symbols are downloaded;
+    afterwards it is served from the database like anything else.
+    """
+    if request.level == "stock" and request.sector:
+        try:
+            fetch = ingestion.refresh_sector_stocks(
+                session, request.sector, only_missing=True, trigger="drilldown"
+            )
+            if fetch.rows_written:
+                # New prices invalidate any cached stock-level payload for this sector.
+                get_cache().clear("rrg|stock")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+            ) from exc
+        except Exception:  # noqa: BLE001
+            # A fetch failure must not block the request: whatever is already stored can
+            # still be plotted, and per-stock reasons are reported in `unavailable`.
+            logger.exception("constituent fetch failed for %s", request.sector)
+
     try:
         return build_rrg(session, request)
     except InsufficientHistory as exc:
@@ -383,6 +494,8 @@ def reseed(
     session: Session = Depends(get_session),
 ) -> dict:
     result = seed_universe(session, overwrite=overwrite)
+    session.commit()
+    result["constituents"] = seed_constituents(session, overwrite=overwrite)
     session.commit()
     return result
 
