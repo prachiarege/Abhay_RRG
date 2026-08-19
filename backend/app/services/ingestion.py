@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 from sqlalchemy import Select, select
@@ -322,6 +322,11 @@ def refresh_sector_stocks(
     from ..models import Stock
 
     provider = provider or get_provider()
+
+    if start is None:
+        # Stock-level RRG does not need the full index history: a 60-period weekly tail plus
+        # warm-up spans roughly two years. Eight is generous and keeps each fetch smaller.
+        start = date.today() - timedelta(days=int(8 * 365.25))
 
     members = list(
         session.scalars(

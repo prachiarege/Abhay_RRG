@@ -161,6 +161,16 @@ For dependable data, put a licensed feed behind the same provider interface, or 
 archive CSVs into `%LOCALAPPDATA%\SectorRRG\csv\` and set `RRG_DATA_PROVIDER=csv` in
 `%LOCALAPPDATA%\SectorRRG\.env`.
 
+### Drilling into a sector's stocks
+
+The **Plot** control switches between sector indices and the constituents of one sector. The
+first time a sector is opened its constituent prices download — about **10-15 seconds** for a
+15-stock sector, once per sector. After that it is instant. The chart says
+"Downloading constituent price history…" while it happens.
+
+Note that constituent prices are *fresher* than the sector indices with the bundled free
+provider: see the data limitation above.
+
 ### Refreshing
 
 The **Refresh data** button, top right. Run it after market close for the current session.

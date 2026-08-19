@@ -191,10 +191,17 @@ Same response shape as the sector-level payload, plus:
 - top level: `level: "stock"`, `sector`, `membership_as_of`
 - each entry: `level`, `parent_sector`, `membership_as_of`
 
-**Lazy loading.** The first request for a sector downloads its constituents (roughly 10-20
-symbols, a few seconds); later requests come from the database. Constituents are not fetched
-for every sector up front, because that would turn the desktop app's two-minute first run
-into something nearer ten, loading data for sectors the user may never open.
+**Lazy loading.** The first request for a sector downloads its constituents; later requests
+come from the database. Measured against the live provider: **10-14 s** for a 15-stock sector,
+and **~0.6 s** warm. Fetches run 6-way concurrent (vendor calls are latency-bound), which cut
+this from ~37 s serial; concurrency is capped modestly because a free endpoint starts refusing
+connections when hit hard, and a throttled fetch that fails is worse than a slower one that
+works.
+
+Constituents are not fetched for every sector up front: 153 symbols would turn the desktop
+app's two-minute first run into something far longer, loading data for sectors the user may
+never open. Stock history is fetched over 8 years rather than the 12 used for indices, since a
+60-period weekly tail plus warm-up spans roughly two years.
 
 **Composition bias, stated plainly.** Membership is a point-in-time snapshot. A stock-level
 RRG drawn over two years uses *today's* members, so anything since removed from the index is

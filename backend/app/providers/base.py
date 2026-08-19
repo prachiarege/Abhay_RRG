@@ -7,6 +7,7 @@ whole point of this layer: swapping the vendor must not touch a line of RRG math
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
 
@@ -95,13 +96,19 @@ class DataProvider(ABC):
     ) -> OHLCFrame:
         """Daily OHLCV for one symbol. Raises ProviderError on failure."""
 
+    #: Concurrent fetches. Vendor calls are latency-bound, not CPU-bound, so serial
+    #: fetching wastes almost all of the wall time waiting. Kept modest deliberately: a
+    #: free endpoint will rate-limit or start refusing connections if hit hard, and a
+    #: throttled fetch that fails is worse than a slower one that works.
+    max_workers: int = 6
+
     def fetch_many(
         self,
         provider_symbols: dict[str, str],
         start: date | None = None,
         end: date | None = None,
     ) -> tuple[dict[str, OHLCFrame], dict[str, str]]:
-        """Fetch several symbols, isolating failures.
+        """Fetch several symbols concurrently, isolating failures.
 
         Args:
             provider_symbols: {canonical_symbol: provider_symbol}
@@ -110,16 +117,44 @@ class DataProvider(ABC):
             (successes keyed by canonical symbol, {canonical symbol: error message}).
             Partial success is the normal case, not an exception -- SRS 46 requires one
             unavailable sector to leave the others working.
+
+        Only the network calls run in parallel. Nothing here touches the database: callers
+        persist the returned frames on their own thread, because a SQLAlchemy Session is not
+        safe to share across threads.
         """
         results: dict[str, OHLCFrame] = {}
         errors: dict[str, str] = {}
-        for canonical, provider_symbol in provider_symbols.items():
+
+        def one(canonical: str, provider_symbol: str) -> tuple[str, OHLCFrame | None, str | None]:
             try:
-                results[canonical] = self.fetch(provider_symbol, start=start, end=end)
+                return canonical, self.fetch(provider_symbol, start=start, end=end), None
             except ProviderError as exc:
-                errors[canonical] = str(exc)
+                return canonical, None, str(exc)
             except Exception as exc:  # noqa: BLE001 - vendor libraries raise anything
-                errors[canonical] = f"{type(exc).__name__}: {exc}"
+                return canonical, None, f"{type(exc).__name__}: {exc}"
+
+        workers = min(self.max_workers, max(1, len(provider_symbols)))
+        if workers == 1 or len(provider_symbols) == 1:
+            for canonical, provider_symbol in provider_symbols.items():
+                _, frame, error = one(canonical, provider_symbol)
+                if frame is not None:
+                    results[canonical] = frame
+                else:
+                    errors[canonical] = error or "unknown error"
+            return results, errors
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="fetch") as pool:
+            futures = [
+                pool.submit(one, canonical, provider_symbol)
+                for canonical, provider_symbol in provider_symbols.items()
+            ]
+            for future in as_completed(futures):
+                canonical, frame, error = future.result()
+                if frame is not None:
+                    results[canonical] = frame
+                else:
+                    errors[canonical] = error or "unknown error"
+
         return results, errors
 
     def health(self) -> dict:

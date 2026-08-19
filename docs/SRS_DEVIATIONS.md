@@ -248,3 +248,16 @@ coverage. Where 7 of 10 sector indices were four weeks stale (see 1.2), the cons
 series are current. The drill-down is therefore more reliable and fresher than the sector
 view it drills into - backwards from what one would expect, and a further argument for
 section 1's recommendation to replace the data source.
+
+### 10.4 Fetch concurrency
+
+The first version fetched constituents strictly one at a time, which took **37 seconds** for a
+19-stock sector - bad enough to read as a hang. Vendor calls are latency-bound, so
+`DataProvider.fetch_many` now runs 6-way concurrent, bringing a 15-stock sector to **10-14
+seconds** cold and ~0.6 s warm. This also speeds up the sector-index refresh, which uses the
+same method.
+
+Concurrency is deliberately capped at 6 rather than pushed higher: free endpoints throttle or
+refuse connections under load, and a fast fetch that fails is worse than a slower one that
+works. Only the network calls are parallel - the returned frames are persisted on the calling
+thread, because a SQLAlchemy Session is not safe to share across threads.

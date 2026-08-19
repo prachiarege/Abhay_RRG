@@ -192,9 +192,10 @@ Decisions worth recording:
   name lives in the tooltip and the row title.
 - **The membership snapshot date is shown** under the picker, with a note that historical
   views use today's members. The UI does not imply it reconstructed past index composition.
-- **A first drill-down states what is happening.** Prices load lazily, so the overlay reads
-  "Downloading constituent price history..." rather than the generic "Calculating...", and
-  the picker warns how many stocks have no data yet.
+- **A first drill-down states what is happening.** Prices load lazily and the first open of
+  a sector takes 10-15 seconds, so the overlay reads "Downloading constituent price
+  history..." rather than the generic "Calculating...", and the picker warns how many stocks
+  have no data yet. A generic spinner for that long reads as a hang.
 - **Stocks the provider cannot serve stay visible**, greyed with an "n/a" tag and a tooltip
   reason. They are genuinely in the index; hiding them would misrepresent its composition.
 
