@@ -31,7 +31,7 @@ from ..engine.stats import RETURN_WINDOWS, ScoreWeights, relative_returns, rotat
 from ..models import Benchmark, Sector
 from .cache import cache_key, get_cache
 from .ingestion import load_close_series
-from .resample import to_frequency
+from .resample import align_to_weekly_grid, to_frequency
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +85,20 @@ def _series_for(
     frequency: str,
     as_of: date | None,
     include_partial: bool,
+    weekly_grid: pd.Series | None = None,
 ) -> pd.Series:
-    """Load, TRUNCATE, then resample. Order matters -- see the module docstring."""
+    """Load, TRUNCATE, then resample. Order matters -- see the module docstring.
+
+    `weekly_grid` is the benchmark's already-resampled weekly series. When supplied (for
+    sectors, on weekly frequency) the sector is placed on the benchmark's week labels
+    rather than resampled independently -- see `align_to_weekly_grid` for why independent
+    resampling silently drops weeks.
+    """
     daily = load_close_series(session, symbol, end=as_of)
     if daily.empty:
         return daily
+    if frequency == "weekly" and weekly_grid is not None:
+        return align_to_weekly_grid(daily, weekly_grid)
     return to_frequency(daily, frequency, include_partial=include_partial)
 
 
@@ -205,6 +214,7 @@ def build_rrg(
             request.frequency,
             request.as_of,
             request.include_partial,
+            weekly_grid=benchmark_series,
         )
         if sector_series.empty:
             unavailable.append(
@@ -319,6 +329,24 @@ def build_rrg(
     for entry in sectors_payload:
         entry["rotation_score"] = scores.get(entry["symbol"])
 
+    # Staleness. Sectors are plotted at their own most recent valid observation, which is
+    # not always the chart's headline date: real feeds have gaps, and a sector whose data
+    # stopped weeks ago would otherwise sit on the chart looking perfectly current. Rather
+    # than hide the sector or silently carry its last value forward, each point states how
+    # far behind it is and the UI marks it.
+    bar_positions = {
+        pd.Timestamp(stamp).strftime("%Y-%m-%d"): position
+        for position, stamp in enumerate(benchmark_series.index)
+    }
+    headline_position = bar_positions.get(
+        as_of_effective.strftime("%Y-%m-%d") if as_of_effective is not None else "", 0
+    )
+    for entry in sectors_payload:
+        position = bar_positions.get(entry["date"])
+        behind = None if position is None else headline_position - position
+        entry["bars_behind"] = behind
+        entry["is_stale"] = bool(behind is not None and behind > 0)
+
     rotations = [
         event.to_dict()
         for symbol, frame in frames.items()
@@ -394,7 +422,12 @@ def sector_detail(
         session, benchmark_row.symbol, request.frequency, request.as_of, request.include_partial
     )
     sector_series = _series_for(
-        session, symbol, request.frequency, request.as_of, request.include_partial
+        session,
+        symbol,
+        request.frequency,
+        request.as_of,
+        request.include_partial,
+        weekly_grid=benchmark_series,
     )
     if sector_series.empty or benchmark_series.empty:
         raise InsufficientHistory(f"no stored data for {symbol} or {request.benchmark}")
@@ -484,7 +517,9 @@ def persist_rotations(
 
     inserted = 0
     for sector in sectors:
-        sector_series = _series_for(session, sector.symbol, frequency, None, False)
+        sector_series = _series_for(
+            session, sector.symbol, frequency, None, False, weekly_grid=benchmark_series
+        )
         if sector_series.empty:
             continue
         try:

@@ -163,8 +163,23 @@ def refresh_prices(
     for symbol, message in errors.items():
         logger.error("ingestion failed for %s: %s", symbol, message)
 
+    # Gap detection needs a reference calendar, and the benchmark is the authority on which
+    # days were sessions (SRS 28). Without this, a sector missing a month of data validates
+    # perfectly cleanly -- which is how such a gap reaches the chart unnoticed.
+    from ..config import get_settings
+
+    default_benchmark = get_settings().default_benchmark
+    reference_calendar = None
+    benchmark_payload = fetched.get(default_benchmark)
+    if benchmark_payload is not None:
+        reference_calendar = benchmark_payload.frame.index
+
     for symbol, payload in fetched.items():
-        report = validate_price_series(payload.close, symbol)
+        report = validate_price_series(
+            payload.close,
+            symbol,
+            expected_calendar=None if symbol == default_benchmark else reference_calendar,
+        )
         report.log()
         result.reports[symbol] = report
 

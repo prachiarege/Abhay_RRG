@@ -143,3 +143,75 @@ def test_suspicious_sessions_flags_a_saturday_bar():
     flagged = suspicious_sessions(index)
     assert pd.Timestamp("2025-02-01").date() in flagged
     assert pd.Timestamp("2025-01-31").date() not in flagged
+
+
+# --------------------------------------------------------- benchmark weekly-grid alignment
+
+
+def test_sector_missing_the_benchmark_friday_still_aligns():
+    """Regression: independently-resampled weekly labels silently dropped whole weeks.
+
+    The benchmark trades Mon-Fri. The sector is missing Friday but traded Thursday. Both
+    series therefore have an observation for that week, but resampling each on its own
+    labels one bar Friday and the other Thursday, and a reindex then finds no match --
+    producing NaN for a week in which the sector demonstrably traded.
+    """
+    from app.services.resample import align_to_weekly_grid
+
+    benchmark_daily = _daily(
+        ["2025-01-06", "2025-01-07", "2025-01-08", "2025-01-09", "2025-01-10"],
+        [200, 201, 202, 203, 204],
+    )
+    sector_daily = _daily(
+        ["2025-01-06", "2025-01-07", "2025-01-08", "2025-01-09"],
+        [100, 101, 102, 103],
+    )
+    benchmark_weekly = to_weekly(benchmark_daily, include_partial=True)
+    assert str(benchmark_weekly.index[-1].date()) == "2025-01-10"
+
+    # The naive approach loses the week entirely.
+    naive = to_weekly(sector_daily, include_partial=True).reindex(benchmark_weekly.index)
+    assert naive.isna().all()
+
+    # Period-matched alignment keeps the sector's own Thursday close on the Friday label.
+    aligned = align_to_weekly_grid(sector_daily, benchmark_weekly)
+    assert list(aligned.index) == list(benchmark_weekly.index)
+    assert aligned.iloc[-1] == 103
+
+
+def test_weekly_grid_preserves_genuine_gaps():
+    """A week where the sector truly did not trade must stay NaN, not be carried forward."""
+    from app.services.resample import align_to_weekly_grid
+
+    benchmark_daily = _daily(
+        [
+            "2025-01-06", "2025-01-10",
+            "2025-01-13", "2025-01-17",
+            "2025-01-20", "2025-01-24",
+        ],
+        [200, 201, 202, 203, 204, 205],
+    )
+    # The sector skips the middle week completely.
+    sector_daily = _daily(
+        ["2025-01-06", "2025-01-10", "2025-01-20", "2025-01-24"],
+        [100, 101, 104, 105],
+    )
+    benchmark_weekly = to_weekly(benchmark_daily, include_partial=True)
+    aligned = align_to_weekly_grid(sector_daily, benchmark_weekly)
+
+    assert len(aligned) == 3
+    assert aligned.iloc[0] == 101
+    assert pd.isna(aligned.iloc[1]), "a real gap must remain a gap"
+    assert aligned.iloc[2] == 105
+
+
+def test_weekly_grid_handles_empty_sector():
+    from app.services.resample import align_to_weekly_grid
+
+    benchmark_weekly = to_weekly(
+        _daily(["2025-01-06", "2025-01-10"], [200, 201]), include_partial=True
+    )
+    empty = pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
+    aligned = align_to_weekly_grid(empty, benchmark_weekly)
+    assert len(aligned) == len(benchmark_weekly)
+    assert aligned.isna().all()

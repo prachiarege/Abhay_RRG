@@ -1,0 +1,24 @@
+import type { Metadata, Viewport } from "next";
+
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Indian Sector Rotation Graph",
+  description:
+    "Relative Rotation Graph analytics for Indian equity market sectors: RS-Ratio, " +
+    "RS-Momentum, quadrant rotation, historical playback and sector ranking.",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#0b0f14",
+};
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}

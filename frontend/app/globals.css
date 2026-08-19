@@ -1,0 +1,942 @@
+/*
+ * Indian Sector Rotation Graph -- visual system.
+ *
+ * Design intent: a dense, low-chrome analyst tool. The chart is the product, so the
+ * interface stays quiet -- desaturated slate ground, one accent, and colour reserved
+ * almost entirely for quadrant and return semantics. Data is set in a tabular-figure
+ * font so digits align in columns and changing values do not shift horizontally.
+ */
+
+:root {
+  --bg: #0b0f14;
+  --bg-panel: #11171f;
+  --bg-panel-2: #161d27;
+  --bg-hover: #1b232f;
+  --border: #232d3b;
+  --border-strong: #33415480;
+
+  --text: #e6edf5;
+  --text-muted: #8b9bb0;
+  --text-dim: #5f6f83;
+
+  --accent: #4c9aff;
+  --accent-dim: #4c9aff22;
+
+  --leading: #22c55e;
+  --weakening: #f59e0b;
+  --lagging: #ef4444;
+  --improving: #3b82f6;
+
+  --pos: #34d399;
+  --neg: #f87171;
+
+  --rail: 268px;
+  --header: 52px;
+  --radius: 6px;
+
+  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular figures everywhere numbers live, so columns stay aligned as values update. */
+.num,
+table td,
+table th {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+button,
+select,
+input {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ------------------------------------------------------------------ app shell */
+
+.app {
+  display: grid;
+  grid-template-rows: var(--header) 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.body {
+  display: grid;
+  grid-template-columns: var(--rail) 1fr;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.main {
+  display: grid;
+  grid-template-rows: 1fr auto auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* --------------------------------------------------------------------- header */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.header .mark {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 2px;
+  background: linear-gradient(135deg, var(--leading), var(--improving));
+}
+
+.header-meta {
+  display: flex;
+  gap: 18px;
+  margin-left: auto;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.header-meta b {
+  color: var(--text);
+  font-weight: 550;
+}
+
+.header-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ----------------------------------------------------------------------- rail */
+
+.rail {
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 14px 14px 28px;
+}
+
+.rail::-webkit-scrollbar,
+.table-wrap::-webkit-scrollbar,
+.drawer::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.rail::-webkit-scrollbar-thumb,
+.table-wrap::-webkit-scrollbar-thumb,
+.drawer::-webkit-scrollbar-thumb {
+  background: #2b3746;
+  border-radius: 5px;
+}
+
+.group {
+  margin-bottom: 20px;
+}
+
+.group > h3 {
+  margin: 0 0 9px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.field {
+  margin-bottom: 10px;
+}
+
+.field > label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+select,
+input[type="number"] {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  appearance: none;
+}
+
+select:hover,
+input[type="number"]:hover {
+  border-color: var(--border-strong);
+}
+
+/* Segmented control, used for frequency and the history presets. */
+.segmented {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px;
+}
+
+.segmented button {
+  flex: 1 1 auto;
+  min-width: 34px;
+  padding: 4px 6px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.segmented button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* Toggles */
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.toggle:hover {
+  color: var(--text);
+}
+
+.toggle input {
+  appearance: none;
+  width: 30px;
+  height: 16px;
+  border-radius: 9px;
+  background: #2a3543;
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.14s;
+  flex: none;
+}
+
+.toggle input::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.14s, background 0.14s;
+}
+
+.toggle input:checked {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.toggle input:checked::after {
+  transform: translateX(14px);
+  background: var(--accent);
+}
+
+/* Sector picker */
+.sector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sector-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.sector-row:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.sector-row input {
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border: 1px solid #3b4859;
+  border-radius: 3px;
+  cursor: pointer;
+  flex: none;
+  position: relative;
+}
+
+.sector-row input:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.sector-row input:checked::after {
+  content: "";
+  position: absolute;
+  left: 3.5px;
+  top: 0.5px;
+  width: 4px;
+  height: 8px;
+  border: solid #0b0f14;
+  border-width: 0 1.6px 1.6px 0;
+  transform: rotate(45deg);
+}
+
+.sector-row.disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.sector-row .name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.link-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+.link-btn:disabled {
+  color: var(--text-dim);
+  cursor: default;
+  text-decoration: none;
+}
+
+/* --------------------------------------------------------------------- chart */
+
+/* flex:1 with min-height:0 lets the plot claim all the height the row has spare instead
+   of collapsing to its own minimum. Without min-height:0 a flex item refuses to shrink
+   below its content, and the chart would push the table off-screen. */
+.chart-panel {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 260px;
+  padding: 10px 12px 0;
+}
+
+.chart {
+  width: 100%;
+  height: 100%;
+}
+
+.chart-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #0b0f14cc;
+  z-index: 5;
+  text-align: center;
+  padding: 24px;
+}
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin: 0 auto 10px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.error-box {
+  max-width: 520px;
+  padding: 16px 18px;
+  background: var(--bg-panel);
+  border: 1px solid #7f1d1d;
+  border-left: 3px solid var(--neg);
+  border-radius: var(--radius);
+  text-align: left;
+}
+
+.error-box h4 {
+  margin: 0 0 6px;
+  color: var(--neg);
+  font-size: 12px;
+}
+
+.error-box p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Legend + toolbar above the chart */
+.chart-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px 8px;
+  flex-wrap: wrap;
+}
+
+.legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.btn {
+  padding: 4px 9px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent-dim);
+  border-color: #4c9aff55;
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------------------ playback */
+
+.playback {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+
+.playback-controls {
+  display: flex;
+  gap: 3px;
+}
+
+.icon-btn {
+  width: 26px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-btn.active {
+  background: var(--accent-dim);
+  border-color: #4c9aff55;
+  color: var(--accent);
+}
+
+.scrubber {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-panel);
+  cursor: pointer;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--bg-panel);
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.playback-date {
+  min-width: 96px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.playback-note {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------- table */
+
+.table-panel {
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  max-height: 38vh;
+}
+
+.table-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.table-head h3 {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.table-wrap {
+  overflow: auto;
+  min-height: 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel-2);
+  padding: 6px 10px;
+  text-align: right;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  z-index: 1;
+  font-family: var(--font-ui);
+}
+
+thead th:first-child,
+tbody td:first-child {
+  text-align: left;
+}
+
+thead th:hover {
+  color: var(--text);
+}
+
+thead th .arrow {
+  color: var(--accent);
+  margin-left: 3px;
+}
+
+tbody td {
+  padding: 5px 10px;
+  text-align: right;
+  border-bottom: 1px solid #1a222d;
+  white-space: nowrap;
+}
+
+tbody tr {
+  cursor: pointer;
+}
+
+tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+tbody tr.selected {
+  background: var(--accent-dim);
+}
+
+.cell-sector {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.pos {
+  color: var(--pos);
+}
+
+.neg {
+  color: var(--neg);
+}
+
+.pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-ui);
+}
+
+.rotation-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-weight: 600;
+  font-family: var(--font-ui);
+  margin-left: 6px;
+}
+
+/* --------------------------------------------------------------------- drawer */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: #00000066;
+  z-index: 40;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 430px;
+  max-width: 92vw;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  z-index: 41;
+  overflow-y: auto;
+  padding: 16px 18px 30px;
+  animation: slide-in 0.16s ease-out;
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(14px);
+    opacity: 0.6;
+  }
+}
+
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.drawer-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 620;
+}
+
+.drawer-head .close {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.drawer-head .close:hover {
+  color: var(--text);
+}
+
+.drawer-sub {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-bottom: 14px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.stat {
+  padding: 8px 10px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.stat .k {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stat .v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  margin-top: 2px;
+}
+
+.drawer h4 {
+  margin: 16px 0 7px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.kv {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px solid #1a222d;
+  font-size: 12px;
+}
+
+.kv .k {
+  color: var(--text-muted);
+}
+
+.kv .v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.event {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid #1a222d;
+  font-size: 11.5px;
+}
+
+.event .date {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  flex: none;
+}
+
+.mini-chart {
+  width: 100%;
+  height: 190px;
+  margin-top: 4px;
+}
+
+/* ---------------------------------------------------------------- misc / notes */
+
+.notice {
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  background: #1c1608;
+  border: 1px solid #78350f;
+  border-left: 3px solid var(--weakening);
+  border-radius: var(--radius);
+  color: #fcd9a0;
+  font-size: 11px;
+}
+
+.notice ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.footnote {
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.5;
+  margin-top: 8px;
+}
+
+.empty {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  padding: 10px 0;
+}
+
+/* Below this width the rail would squeeze the chart into uselessness; the SRS scopes
+   the MVP to desktop (52.4), so the rail collapses to a scrollable strip rather than
+   attempting a genuine mobile layout. */
+@media (max-width: 1100px) {
+  :root {
+    --rail: 224px;
+  }
+}
+
+@media (max-width: 860px) {
+  .body {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    max-height: 40vh;
+  }
+
+  .app {
+    height: auto;
+    min-height: 100vh;
+  }
+}

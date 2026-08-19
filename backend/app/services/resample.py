@@ -88,3 +88,40 @@ def to_frequency(
     raise ValueError(
         f"unsupported frequency {frequency!r}; supported: daily, weekly"
     )
+
+
+def align_to_weekly_grid(
+    sector_daily: pd.Series,
+    benchmark_weekly: pd.Series,
+    anchor: str = WEEK_ANCHOR,
+) -> pd.Series:
+    """Place a sector's weekly closes on the BENCHMARK's weekly labels.
+
+    Resampling two series independently and then reindexing one onto the other does not
+    work, and the failure is silent. Each series' weekly bar is labelled with its OWN last
+    trading day, so a sector that is missing the benchmark's Friday gets labelled Thursday;
+    the reindex then finds no match and yields NaN for a week where the sector in fact
+    traded. With real feeds -- whose sector coverage is patchier than their index coverage
+    -- this drops scattered weeks and leaves sectors plotted at stale dates.
+
+    Matching on the week PERIOD instead pairs "the sector's last close that week" with
+    "the benchmark's last close that week", which is what a weekly relative comparison
+    means. A week where the sector genuinely has no observation still yields NaN, because
+    that is a real gap rather than a labelling artefact.
+    """
+    empty = pd.Series(
+        dtype="float64", index=benchmark_weekly.index, name=sector_daily.name
+    )
+    daily = normalise_daily(sector_daily).dropna()
+    if daily.empty or benchmark_weekly.empty:
+        return empty
+
+    weekly_by_period = daily.groupby(daily.index.to_period(anchor)).last()
+    target_periods = benchmark_weekly.index.to_period(anchor)
+    values = weekly_by_period.reindex(target_periods)
+
+    return pd.Series(
+        values.to_numpy(dtype="float64"),
+        index=benchmark_weekly.index,
+        name=sector_daily.name,
+    )
