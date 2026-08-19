@@ -1,0 +1,298 @@
+"""Data ingestion (SRS 5, 29, 45, 46).
+
+Failure isolation is the governing principle: one unavailable sector must never stop the
+others (SRS 46). Every symbol is fetched, validated and stored independently, and the
+run is summarised into `ingestion_log` whether it fully succeeded or not.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
+
+import pandas as pd
+from sqlalchemy import Select, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session
+
+from ..models import Benchmark, IngestionLog, PriceData, Sector
+from ..providers import DataProvider, get_provider
+from ..providers.base import OHLCFrame
+from ..seed import ingestable_symbols
+from .validation import ValidationReport, validate_price_series
+
+logger = logging.getLogger(__name__)
+
+UPSERT_COLUMNS = ("open", "high", "low", "close", "adjusted_close", "volume", "ingested_at")
+
+
+@dataclass
+class IngestionResult:
+    provider: str
+    trigger: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    requested: list[str] = field(default_factory=list)
+    succeeded: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)
+    rows_written: int = 0
+    reports: dict[str, ValidationReport] = field(default_factory=dict)
+
+    @property
+    def status(self) -> str:
+        if not self.succeeded:
+            return "failed"
+        return "partial" if self.failed else "success"
+
+    def to_dict(self) -> dict:
+        return {
+            "provider": self.provider,
+            "trigger": self.trigger,
+            "status": self.status,
+            "started_at": self.started_at.isoformat(),
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "requested": len(self.requested),
+            "succeeded": len(self.succeeded),
+            "failed": self.failed,
+            "rows_written": self.rows_written,
+            "validation": {k: v.to_dict() for k, v in self.reports.items()},
+        }
+
+
+def _upsert(session: Session, rows: list[dict]) -> int:
+    """Insert-or-update price rows, portably.
+
+    SQLite and Postgres both support ON CONFLICT, so the only dialect-specific part is
+    which `insert` construct to build. Anything else falls back to a read-then-write
+    path rather than failing.
+    """
+    if not rows:
+        return 0
+
+    dialect = session.get_bind().dialect.name
+    if dialect in ("sqlite", "postgresql"):
+        builder = sqlite_insert if dialect == "sqlite" else pg_insert
+        statement = builder(PriceData).values(rows)
+        statement = statement.on_conflict_do_update(
+            index_elements=["symbol", "date", "source"],
+            set_={column: getattr(statement.excluded, column) for column in UPSERT_COLUMNS},
+        )
+        session.execute(statement)
+        return len(rows)
+
+    # Generic fallback: skip rows that already exist, insert the rest.
+    keys = {(r["symbol"], r["date"], r["source"]) for r in rows}
+    existing = set(
+        session.execute(
+            select(PriceData.symbol, PriceData.date, PriceData.source).where(
+                PriceData.symbol.in_({k[0] for k in keys})
+            )
+        ).all()
+    )
+    fresh = [r for r in rows if (r["symbol"], r["date"], r["source"]) not in existing]
+    if fresh:
+        session.bulk_insert_mappings(PriceData, fresh)
+    return len(fresh)
+
+
+def _frame_to_rows(symbol: str, payload: OHLCFrame) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    frame = payload.frame
+    rows: list[dict] = []
+    for stamp, row in frame.iterrows():
+        close = row.get("close")
+        if pd.isna(close):
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "date": pd.Timestamp(stamp).date(),
+                "source": payload.source,
+                "open": None if pd.isna(row.get("open")) else float(row["open"]),
+                "high": None if pd.isna(row.get("high")) else float(row["high"]),
+                "low": None if pd.isna(row.get("low")) else float(row["low"]),
+                "close": float(close),
+                "adjusted_close": None,
+                "volume": None if pd.isna(row.get("volume")) else float(row["volume"]),
+                "ingested_at": now,
+            }
+        )
+    return rows
+
+
+def refresh_prices(
+    session: Session,
+    provider: DataProvider | None = None,
+    symbols: dict[str, str] | None = None,
+    start: date | None = None,
+    trigger: str = "manual",
+) -> IngestionResult:
+    """Fetch, validate and store price history for the active universe.
+
+    Args:
+        session: open session; this function commits its own work.
+        provider: override the configured provider.
+        symbols: {canonical: provider_symbol}; defaults to the whole active universe.
+        start: earliest date to request. None means the provider's full window.
+        trigger: "manual" | "scheduled" | "startup", recorded in the audit log.
+    """
+    provider = provider or get_provider()
+    symbols = symbols if symbols is not None else ingestable_symbols(session)
+
+    result = IngestionResult(
+        provider=provider.name,
+        trigger=trigger,
+        started_at=datetime.now(timezone.utc),
+        requested=sorted(symbols),
+    )
+
+    log_row = IngestionLog(
+        started_at=result.started_at,
+        provider=provider.name,
+        trigger=trigger,
+        symbols_requested=len(symbols),
+        status="running",
+    )
+    session.add(log_row)
+    session.commit()
+
+    fetched, errors = provider.fetch_many(symbols, start=start)
+    result.failed.update(errors)
+    for symbol, message in errors.items():
+        logger.error("ingestion failed for %s: %s", symbol, message)
+
+    for symbol, payload in fetched.items():
+        report = validate_price_series(payload.close, symbol)
+        report.log()
+        result.reports[symbol] = report
+
+        if not report.ok:
+            result.failed[symbol] = (
+                f"validation failed: duplicates={len(report.duplicate_dates)} "
+                f"non_positive={len(report.non_positive_values)}"
+            )
+            continue
+
+        rows = _frame_to_rows(symbol, payload)
+        try:
+            written = _upsert(session, rows)
+            session.commit()
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            logger.exception("failed storing %s", symbol)
+            result.failed[symbol] = f"storage error: {exc}"
+            continue
+
+        result.rows_written += written
+        result.succeeded.append(symbol)
+
+    result.finished_at = datetime.now(timezone.utc)
+    log_row.finished_at = result.finished_at
+    log_row.symbols_succeeded = len(result.succeeded)
+    log_row.rows_written = result.rows_written
+    log_row.status = result.status
+    log_row.detail = (
+        "; ".join(f"{k}: {v}" for k, v in sorted(result.failed.items())) or None
+    )
+    session.commit()
+
+    logger.info(
+        "ingestion %s: %d/%d symbols, %d rows",
+        result.status,
+        len(result.succeeded),
+        len(result.requested),
+        result.rows_written,
+    )
+    return result
+
+
+def _price_query(symbol: str, source: str | None) -> Select:
+    query = select(PriceData.date, PriceData.close).where(PriceData.symbol == symbol)
+    if source is not None:
+        query = query.where(PriceData.source == source)
+    return query.order_by(PriceData.date)
+
+
+def load_close_series(
+    session: Session,
+    symbol: str,
+    source: str | None = None,
+    end: date | None = None,
+) -> pd.Series:
+    """Daily close series for one symbol, ascending, as a float Series.
+
+    When several providers have supplied the same symbol, `source` selects between
+    them; without it the configured provider is preferred and any other source is used
+    only as a fallback, so results never silently mix vendors within one series.
+    """
+    if source is None:
+        from ..config import get_settings
+
+        preferred = get_settings().data_provider
+        rows = session.execute(_price_query(symbol, preferred)).all()
+        if not rows:
+            rows = session.execute(_price_query(symbol, None)).all()
+    else:
+        rows = session.execute(_price_query(symbol, source)).all()
+
+    if not rows:
+        return pd.Series(dtype="float64", index=pd.DatetimeIndex([], name="date"))
+
+    index = pd.DatetimeIndex([pd.Timestamp(r[0]) for r in rows], name="date")
+    series = pd.Series([float(r[1]) for r in rows], index=index, name=symbol)
+    series = series[~series.index.duplicated(keep="last")].sort_index()
+
+    if end is not None:
+        series = series[series.index <= pd.Timestamp(end)]
+    return series
+
+
+def data_freshness(session: Session) -> dict:
+    """Latest stored observation per symbol, for the header and health endpoints."""
+    from sqlalchemy import func
+
+    rows = session.execute(
+        select(PriceData.symbol, func.max(PriceData.date)).group_by(PriceData.symbol)
+    ).all()
+    latest = {symbol: stamp for symbol, stamp in rows if stamp is not None}
+    overall = max(latest.values()) if latest else None
+    return {
+        "symbols": len(latest),
+        "latest_date": overall.isoformat() if overall else None,
+        "per_symbol": {k: v.isoformat() for k, v in sorted(latest.items())},
+    }
+
+
+def last_ingestion(session: Session) -> dict | None:
+    row = session.scalar(select(IngestionLog).order_by(IngestionLog.id.desc()).limit(1))
+    if row is None:
+        return None
+    return {
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "provider": row.provider,
+        "trigger": row.trigger,
+        "status": row.status,
+        "symbols_requested": row.symbols_requested,
+        "symbols_succeeded": row.symbols_succeeded,
+        "rows_written": row.rows_written,
+        "detail": row.detail,
+    }
+
+
+def universe(session: Session) -> tuple[list[Sector], list[Benchmark]]:
+    sectors = list(
+        session.scalars(
+            select(Sector).where(Sector.active.is_(True)).order_by(Sector.sort_order)
+        )
+    )
+    benchmarks = list(
+        session.scalars(
+            select(Benchmark)
+            .where(Benchmark.active.is_(True))
+            .order_by(Benchmark.sort_order)
+        )
+    )
+    return sectors, benchmarks
