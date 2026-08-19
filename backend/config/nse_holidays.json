@@ -1,0 +1,5 @@
+{
+  "_comment": "NSE trading holidays. Movable holidays vary yearly and are NOT guessed by the application - top this list up each year from the NSE circular. Fixed-date national holidays are handled in code (see app/services/calendar.py FIXED_HOLIDAYS). An empty list is safe: the authoritative trading calendar is derived from the benchmark data itself.",
+  "source": "https://www.nseindia.com/resources/exchange-communication-holidays",
+  "holidays": []
+}

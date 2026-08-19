@@ -1,0 +1,50 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Node / Next.js -------------------------------------------------------
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+.eslintcache
+
+# --- Data and secrets -----------------------------------------------------
+# Market data and the local database are derived artefacts: reproducible from the
+# provider by running `python -m scripts.ingest`, and far too large to version.
+backend/data/
+!backend/data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+.env
+.env.local
+.env.*.local
+
+# CSV fixtures under tests/ ARE versioned (they pin acceptance values); loose CSV
+# drops in the provider directory are not.
+backend/data/csv/*.csv
+
+# --- Editors / OS ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs -----------------------------------------------------------------
+*.log
+logs/
