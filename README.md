@@ -8,7 +8,22 @@ TypeScript · ECharts
 
 ---
 
-## Quick start
+## Two ways to run it
+
+**Single-user desktop (no install).** One folder, one `.exe`, nothing to install on the
+target machine — no Python, no Node.js. Build it with:
+
+```bash
+cd backend && .venv/Scripts/python build_exe.py
+```
+
+Ship `backend/dist/SectorRRG/`. See [`docs/DESKTOP_BUILD.md`](docs/DESKTOP_BUILD.md).
+
+**Development / server mode.** Backend and frontend as separate processes, below.
+
+---
+
+## Quick start (development)
 
 ```bash
 # --- backend ---
@@ -92,6 +107,7 @@ function, so history can be replayed without look-ahead.
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Pipeline, module map, DB schema, deployment, configuration |
 | [`docs/API.md`](docs/API.md) | Endpoint reference with response shapes |
 | [`docs/UI_UX_SPEC.md`](docs/UI_UX_SPEC.md) | Design decisions and rationale |
+| [`docs/DESKTOP_BUILD.md`](docs/DESKTOP_BUILD.md) | Single-user Windows build: what the end user needs (nothing), how packaging works, troubleshooting |
 | [`docs/SRS_DEVIATIONS.md`](docs/SRS_DEVIATIONS.md) | **Read this first.** Every departure from the SRS (§1–6), 6 open client decisions (§7), and the 4 build-time assumptions taken without an answer (§9) |
 
 ---

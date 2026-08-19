@@ -24,7 +24,21 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "nse_holidays.json"
+def _config_path() -> Path:
+    """Locate the holiday file in the source tree or inside a PyInstaller bundle.
+
+    A user-supplied copy in the data directory wins, so the annual holiday update does not
+    require rebuilding the executable.
+    """
+    from ..config import DATA_ROOT, bundle_root
+
+    user_copy = DATA_ROOT / "nse_holidays.json"
+    if user_copy.exists():
+        return user_copy
+    return bundle_root() / "config" / "nse_holidays.json"
+
+
+CONFIG_PATH = _config_path()
 
 # Fixed-date national holidays that fall on the same calendar day every year and on
 # which NSE does not trade. Movable feasts (Diwali, Holi, Eid, Good Friday, and the

@@ -11,13 +11,15 @@ import logging
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router
-from .config import get_settings
+from .config import BASE_DIR, get_settings
 from .db import init_db, session_scope
 from .engine.params import ENGINE_VERSION
 from .seed import seed_universe
@@ -119,11 +121,41 @@ async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
 app.include_router(router)
 
 
-@app.get("/", tags=["meta"])
-def root() -> dict:
-    return {
-        "app": settings.app_name,
-        "engine_version": ENGINE_VERSION,
-        "docs": "/docs",
-        "health": "/api/health",
-    }
+def _frontend_dir() -> Path | None:
+    """Locate a statically exported frontend, if one was built.
+
+    Present in the packaged desktop build (`RRG_DESKTOP_BUILD=1 npm run build` writes
+    `frontend/out`, which PyInstaller bundles). Absent in development, where Next.js serves
+    the UI itself on port 3000.
+    """
+    from .config import bundle_root
+
+    candidates = (
+        bundle_root() / "frontend",           # inside the PyInstaller bundle
+        BASE_DIR.parent / "frontend" / "out",  # a local static export
+    )
+    for candidate in candidates:
+        if (candidate / "index.html").is_file():
+            return candidate
+    return None
+
+
+_FRONTEND = _frontend_dir()
+
+if _FRONTEND is not None:
+    # Mounted last so every /api route already claimed its path. `html=True` serves
+    # index.html for directory requests, which is what a Next.js static export expects.
+    app.mount("/", StaticFiles(directory=str(_FRONTEND), html=True), name="ui")
+    logger.info("serving bundled UI from %s", _FRONTEND)
+else:
+
+    @app.get("/", tags=["meta"])
+    def root() -> dict:
+        """API-only landing page. Replaced by the UI when a static export is bundled."""
+        return {
+            "app": settings.app_name,
+            "engine_version": ENGINE_VERSION,
+            "docs": "/docs",
+            "health": "/api/health",
+            "ui": "not bundled - run the Next.js dev server on port 3000",
+        }

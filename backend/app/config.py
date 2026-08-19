@@ -6,6 +6,8 @@ parameter changes never require a source-code change. Defaults follow SRS 51.
 
 from __future__ import annotations
 
+import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,10 +15,39 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 
+#: True when running from a PyInstaller bundle (the packaged desktop .exe).
+FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def data_root() -> Path:
+    """Where the database and CSV drops live.
+
+    When frozen, this MUST NOT be the application directory. PyInstaller extracts a
+    one-file bundle to a temporary path that is deleted on exit, so a database written
+    beside the executable would be silently discarded on every run. User data therefore
+    goes to %LOCALAPPDATA%\\SectorRRG, which survives both restarts and app upgrades.
+    """
+    if FROZEN:
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        return (Path(base) if base else Path.home()) / "SectorRRG"
+    return BASE_DIR / "data"
+
+
+DATA_ROOT = data_root()
+
+
+def bundle_root() -> Path:
+    """Directory holding bundled read-only resources (the exported frontend, configs)."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    return Path(meipass) if meipass else BASE_DIR
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(BASE_DIR / ".env"),
+        # Both locations are read, later winning: the repo's .env for development, and one
+        # in the user data directory so a packaged install can be reconfigured without
+        # touching the executable.
+        env_file=(str(BASE_DIR / ".env"), str(DATA_ROOT / ".env")),
         env_prefix="RRG_",
         extra="ignore",
     )
@@ -26,13 +57,13 @@ class Settings(BaseSettings):
 
     # SQLite by default so the app runs with zero infrastructure. Point this at
     # postgresql+psycopg://... for production; no code changes are required.
-    database_url: str = f"sqlite:///{(BASE_DIR / 'data' / 'rrg.db').as_posix()}"
+    database_url: str = f"sqlite:///{(DATA_ROOT / 'rrg.db').as_posix()}"
     sql_echo: bool = False
 
     # --- data provider -----------------------------------------------------------
     # yahoo | csv | nse
     data_provider: str = "yahoo"
-    csv_data_dir: str = str(BASE_DIR / "data" / "csv")
+    csv_data_dir: str = str(DATA_ROOT / "csv")
     provider_timeout_seconds: int = 30
     history_years: int = 12
 
@@ -78,7 +109,7 @@ class Settings(BaseSettings):
 
     @property
     def data_dir(self) -> Path:
-        return BASE_DIR / "data"
+        return DATA_ROOT
 
 
 @lru_cache(maxsize=1)
