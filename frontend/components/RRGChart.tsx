@@ -15,8 +15,15 @@
 import { useEffect, useImperativeHandle, useRef, forwardRef, useCallback } from "react";
 import * as echarts from "echarts";
 
-import { DIRECTION_ROTATION, QUADRANT_STYLE } from "@/lib/format";
-import type { RRGResponse, SectorPoint } from "@/lib/types";
+import { QUADRANT_STYLE } from "@/lib/format";
+import {
+  ARROWHEAD_PATH,
+  arrowBearing,
+  smoothTail,
+  splitIntoBands,
+  type Point,
+} from "@/lib/smoothing";
+import type { RenderConfig, RRGResponse, SectorPoint } from "@/lib/types";
 
 export interface RRGChartHandle {
   /** Export the current view. SVG is re-rendered offscreen so both formats stay crisp. */
@@ -31,7 +38,20 @@ interface Props {
   showArrows: boolean;
   selected: string | null;
   onSelect: (symbol: string | null) => void;
+  /** Server-supplied presentation settings; falls back to sensible defaults while loading. */
+  rendering?: RenderConfig | null;
 }
+
+const DEFAULT_RENDERING: RenderConfig = {
+  tail_smooth: true,
+  tail_interpolation: "catmull_rom",
+  tail_line_width: 2.5,
+  tail_fade_old_points: true,
+  tail_show_observation_dots: true,
+  arrow_enabled: true,
+  arrow_size: 13,
+  arrow_min_movement: 1e-4,
+};
 
 const FALLBACK_COLOR = "#94a3b8";
 
@@ -71,10 +91,18 @@ function buildOption(
   data: RRGResponse,
   showTail: boolean,
   showLabels: boolean,
-  showArrows: boolean,
+  showArrowsRequested: boolean,
   selected: string | null,
+  rendering: RenderConfig,
 ): echarts.EChartsOption {
   const centre = data.center;
+  const smoothTails = rendering.tail_smooth;
+  const tailWidth = rendering.tail_line_width;
+  const fadeOldPoints = rendering.tail_fade_old_points;
+  const showObservationDots = rendering.tail_show_observation_dots;
+  const arrowSize = rendering.arrow_size;
+  // Both the user toggle and the configured default must agree before arrows are drawn.
+  const showArrows = showArrowsRequested && rendering.arrow_enabled;
   const { min, max } = axisBounds(data);
   const series: echarts.SeriesOption[] = [];
 
@@ -132,39 +160,90 @@ function buildOption(
 
     if (points.length === 0) continue;
 
-    // The trail: a line through the tail, thinning towards the oldest point.
+    // The trail: a centripetal Catmull-Rom curve through the real observations, split into
+    // age bands so older sections fade (V2-RRG-001 / SRS V2 7.2). The curve passes exactly
+    // through every observation and is guarded against crossing a quadrant boundary that
+    // the data itself does not cross -- see lib/smoothing.ts for why that guard exists.
     if (showTail && points.length > 1) {
-      series.push({
-        name: sector.symbol,
-        type: "line",
-        data: points,
-        showSymbol: true,
-        symbolSize: (_v, params) => {
-          const t = params.dataIndex / Math.max(1, points.length - 1);
-          return 2 + t * 3;
-        },
-        itemStyle: { color: colour, opacity: opacity * 0.75 },
-        lineStyle: {
-          color: colour,
-          width: dimmed ? 1 : selected === sector.symbol ? 2.2 : 1.5,
-          opacity: opacity * 0.75,
-        },
-        emphasis: { disabled: true },
-        z: dimmed ? 2 : 3,
-        animation: false,
+      const observations: Point[] = points.map((p) => ({ x: p[0] as number, y: p[1] as number }));
+      const curve = smoothTail(observations, centre, smoothTails);
+      const bands = splitIntoBands(curve, dimmed ? 1 : 3);
+      const baseWidth = dimmed ? 1 : selected === sector.symbol ? 2.8 : tailWidth;
+
+      bands.forEach((band, index) => {
+        // Oldest band faintest. A single band (dimmed sectors) keeps full relative opacity.
+        const age = bands.length > 1 ? (index + 1) / bands.length : 1;
+        const bandOpacity = opacity * (fadeOldPoints ? 0.3 + 0.7 * age : 0.8);
+        series.push({
+          name: sector.symbol,
+          type: "line",
+          data: band,
+          showSymbol: false,
+          lineStyle: {
+            color: colour,
+            width: baseWidth * (0.7 + 0.3 * age),
+            opacity: bandOpacity,
+            cap: "round",
+            join: "round",
+          },
+          emphasis: { disabled: true },
+          silent: true,
+          z: dimmed ? 2 : 3,
+          animation: false,
+        });
       });
+
+      // Subtle dots marking the real observations, so the smoothed curve never hides where
+      // the actual data points are (7.2: "must not dominate the curve").
+      if (showObservationDots && !dimmed) {
+        series.push({
+          name: sector.symbol,
+          type: "scatter",
+          data: points.slice(0, -1),
+          symbolSize: 3.4,
+          itemStyle: { color: colour, opacity: opacity * 0.55 },
+          emphasis: { disabled: true },
+          silent: true,
+          z: 4,
+          animation: false,
+        });
+      }
     }
 
-    // The head: current position, labelled, optionally carrying a direction arrow.
+    // The arrowhead: a real path, drawn at the tail head and rotated to the latest movement
+    // vector (V2-RRG-002). Kept visually subordinate to the endpoint marker per 7.3, and
+    // drawn beneath it so the marker remains the point the eye lands on.
     const head = points[points.length - 1];
+    if (showArrows && !dimmed) {
+      const observations: Point[] = points.map((p) => ({ x: p[0] as number, y: p[1] as number }));
+      const bearing = arrowBearing(observations);
+      if (bearing !== null) {
+        series.push({
+          name: sector.symbol,
+          type: "scatter",
+          data: [head],
+          symbol: ARROWHEAD_PATH,
+          symbolSize: arrowSize,
+          symbolRotate: bearing,
+          // Nudge the head off the marker so the two shapes read as marker + direction
+          // rather than one blob.
+          symbolOffset: [0, 0],
+          itemStyle: { color: colour, opacity: opacity * 0.95 },
+          emphasis: { disabled: true },
+          silent: true,
+          z: 5,
+          animation: false,
+        });
+      }
+    }
+
+    // The endpoint marker: current position, labelled.
     series.push({
       name: sector.symbol,
       type: "scatter",
       data: [head],
-      symbol: showArrows && sector.direction && sector.direction !== "flat" ? "triangle" : "circle",
-      symbolSize: selected === sector.symbol ? 15 : 11,
-      symbolRotate:
-        showArrows && sector.direction ? DIRECTION_ROTATION[sector.direction] - 90 : 0,
+      symbol: "circle",
+      symbolSize: selected === sector.symbol ? 13 : 9,
       itemStyle: {
         color: colour,
         opacity,
@@ -287,9 +366,10 @@ function buildOption(
 }
 
 export const RRGChart = forwardRef<RRGChartHandle, Props>(function RRGChart(
-  { data, showTail, showLabels, showArrows, selected, onSelect },
+  { data, showTail, showLabels, showArrows, selected, onSelect, rendering },
   ref,
 ) {
+  const renderConfig = rendering ?? DEFAULT_RENDERING;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<echarts.ECharts | null>(null);
   const optionRef = useRef<echarts.EChartsOption | null>(null);
@@ -331,14 +411,21 @@ export const RRGChart = forwardRef<RRGChartHandle, Props>(function RRGChart(
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || !data) return;
-    const option = buildOption(data, showTail, showLabels, showArrows, selected);
+    const option = buildOption(
+      data,
+      showTail,
+      showLabels,
+      showArrows,
+      selected,
+      renderConfig,
+    );
     optionRef.current = option;
     // notMerge, so series removed by a sector deselection actually disappear.
     chart.setOption(option, { notMerge: true, lazyUpdate: false });
     // Belt and braces alongside the ResizeObserver: if the canvas and its container have
     // drifted apart for any reason, this is the cheap point at which to reconcile them.
     chart.resize();
-  }, [data, showTail, showLabels, showArrows, selected]);
+  }, [data, showTail, showLabels, showArrows, selected, renderConfig]);
 
   const download = useCallback(
     (format: "png" | "svg") => {

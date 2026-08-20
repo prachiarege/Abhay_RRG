@@ -82,6 +82,26 @@ class Settings(BaseSettings):
     quadrant_center: float = 100.0
     include_partial_week: bool = False
 
+    # --- chart rendering (SRS V2 Appendix A.3) ----------------------------------
+    # Presentation only. None of these touch the calculation engine -- V2 7.2 is explicit
+    # that smoothing is a rendering layer and must not change observations.
+    tail_smooth: bool = True
+    tail_interpolation: str = "catmull_rom"
+    tail_line_width: float = 2.5
+    tail_fade_old_points: bool = True
+    tail_show_observation_dots: bool = True
+    arrow_enabled: bool = True
+    arrow_size: float = 13.0
+    arrow_min_movement: float = 1e-4
+
+    # --- workspace layout bounds (SRS V2 11.4) ----------------------------------
+    panel_left_min: int = 220
+    panel_left_default: int = 320
+    panel_left_max: int = 500
+    panel_bottom_min: int = 120
+    panel_bottom_default: int = 250
+    panel_bottom_max_percent: int = 60
+
     # --- rotation score weights (SRS 26) ----------------------------------------
     score_weight_rs_ratio: float = 0.40
     score_weight_rs_momentum: float = 0.40

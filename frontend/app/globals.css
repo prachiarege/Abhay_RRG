@@ -30,7 +30,10 @@
   --pos: #34d399;
   --neg: #f87171;
 
-  --rail: 268px;
+  /* Driven by React state at runtime; these are only the pre-hydration values. */
+  --rail: 320px;
+  --bottom-panel: 250px;
+  --handle: 6px;
   --header: 52px;
   --radius: 6px;
 
@@ -87,14 +90,16 @@ input {
 
 .body {
   display: grid;
-  grid-template-columns: var(--rail) 1fr;
+  /* rail | vertical divider | workspace */
+  grid-template-columns: var(--rail) var(--handle) 1fr;
   overflow: hidden;
   min-height: 0;
 }
 
 .main {
   display: grid;
-  grid-template-rows: 1fr auto auto;
+  /* chart | playback | horizontal divider | bottom table */
+  grid-template-rows: 1fr auto var(--handle) var(--bottom-panel);
   min-height: 0;
   overflow: hidden;
 }
@@ -628,7 +633,9 @@ input[type="range"]::-moz-range-thumb {
   background: var(--bg-panel);
   display: flex;
   flex-direction: column;
-  max-height: 38vh;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .table-head {
@@ -881,6 +888,67 @@ tbody tr.selected {
   width: 100%;
   height: 190px;
   margin-top: 4px;
+}
+
+/* ------------------------------------------------------------------- dividers */
+
+.resize-handle {
+  position: relative;
+  background: var(--bg);
+  display: grid;
+  place-items: center;
+  touch-action: none;
+  transition: background 0.12s;
+}
+
+.resize-handle.vertical {
+  cursor: col-resize;
+}
+
+.resize-handle.horizontal {
+  cursor: row-resize;
+}
+
+.resize-handle:hover,
+.resize-handle:focus-visible,
+.resize-handle[data-dragging="true"] {
+  background: var(--accent-dim);
+}
+
+/* The grip: a short bar that appears on hover, so the divider is discoverable without
+   adding permanent visual noise to a deliberately quiet interface. */
+.resize-handle .grip {
+  background: var(--border);
+  border-radius: 2px;
+  transition: background 0.12s;
+}
+
+.resize-handle.vertical .grip {
+  width: 2px;
+  height: 26px;
+}
+
+.resize-handle.horizontal .grip {
+  width: 26px;
+  height: 2px;
+}
+
+.resize-handle:hover .grip,
+.resize-handle:focus-visible .grip,
+.resize-handle[data-dragging="true"] .grip {
+  background: var(--accent);
+}
+
+/* While dragging, suppress text selection and pointer events inside panels so the drag
+   cannot be stolen by the chart canvas or a table row. */
+body.resizing {
+  user-select: none;
+  cursor: inherit;
+}
+
+body.resizing .chart,
+body.resizing .table-wrap {
+  pointer-events: none;
 }
 
 /* ---------------------------------------------------------------- misc / notes */

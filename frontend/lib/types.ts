@@ -187,6 +187,24 @@ export interface AppConfig {
     rs_momentum: number;
     momentum_change: number;
   };
+  /** Presentation settings (SRS V2 Appendix A.3), served so the client hard-codes nothing. */
+  rendering: RenderConfig;
+  layout: {
+    left: { min: number; default: number; max: number };
+    bottom: { min: number; default: number; max_percent: number };
+  };
+}
+
+/** Chart rendering options. Presentation only -- never affects computed values. */
+export interface RenderConfig {
+  tail_smooth: boolean;
+  tail_interpolation: string;
+  tail_line_width: number;
+  tail_fade_old_points: boolean;
+  tail_show_observation_dots: boolean;
+  arrow_enabled: boolean;
+  arrow_size: number;
+  arrow_min_movement: number;
 }
 
 export interface DatesResponse {

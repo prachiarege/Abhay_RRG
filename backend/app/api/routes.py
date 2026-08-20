@@ -258,6 +258,30 @@ def read_config(settings: Settings = Depends(get_settings)) -> dict:
             "rs_momentum": settings.score_weight_rs_momentum,
             "momentum_change": settings.score_weight_momentum_change,
         },
+        # Presentation settings (SRS V2 Appendix A.3). Served rather than hard-coded in the
+        # client so the UI stays configuration-driven, matching V2-DATA-001's principle.
+        "rendering": {
+            "tail_smooth": settings.tail_smooth,
+            "tail_interpolation": settings.tail_interpolation,
+            "tail_line_width": settings.tail_line_width,
+            "tail_fade_old_points": settings.tail_fade_old_points,
+            "tail_show_observation_dots": settings.tail_show_observation_dots,
+            "arrow_enabled": settings.arrow_enabled,
+            "arrow_size": settings.arrow_size,
+            "arrow_min_movement": settings.arrow_min_movement,
+        },
+        "layout": {
+            "left": {
+                "min": settings.panel_left_min,
+                "default": settings.panel_left_default,
+                "max": settings.panel_left_max,
+            },
+            "bottom": {
+                "min": settings.panel_bottom_min,
+                "default": settings.panel_bottom_default,
+                "max_percent": settings.panel_bottom_max_percent,
+            },
+        },
     }
 
 

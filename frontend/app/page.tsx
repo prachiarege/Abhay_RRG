@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ControlPanel } from "@/components/ControlPanel";
+import { ResizeHandle } from "@/components/ResizeHandle";
 import { Header } from "@/components/Header";
 import { PlaybackBar } from "@/components/PlaybackBar";
 import { RRGChart, type RRGChartHandle } from "@/components/RRGChart";
@@ -18,6 +19,16 @@ import { SectorDetailDrawer } from "@/components/SectorDetailDrawer";
 import { SectorTable } from "@/components/SectorTable";
 import { AbortedError, ApiError, api } from "@/lib/api";
 import { QUADRANT_ORDER, QUADRANT_STYLE } from "@/lib/format";
+import {
+  clampLayout,
+  clearLayout,
+  defaultLayout,
+  FALLBACK_LIMITS,
+  loadLayout,
+  saveLayout,
+  type Layout,
+  type LayoutLimits,
+} from "@/lib/layout";
 import type {
   AppConfig,
   BenchmarkMeta,
@@ -71,6 +82,34 @@ export default function Page() {
 
   const chartRef = useRef<RRGChartHandle | null>(null);
 
+  // Workspace layout (V2-UX-001). Held separately from ControlState so that dragging a
+  // divider can never re-trigger the data effect -- SRS V2 11.3 requires resizing not to
+  // cause market-data requests, and V2-AC-08/09 test exactly that.
+  const [layout, setLayout] = useState<Layout>(() => defaultLayout(FALLBACK_LIMITS));
+  const [layoutLimits, setLayoutLimits] = useState<LayoutLimits>(FALLBACK_LIMITS);
+
+  // Apply sizes as CSS variables rather than inline styles on each panel: one write drives
+  // the whole grid, and the chart's ResizeObserver picks up the reflow for free.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--rail", `${layout.leftWidth}px`);
+    root.style.setProperty("--bottom-panel", `${layout.bottomHeight}px`);
+  }, [layout]);
+
+  // Re-clamp on viewport change so a layout saved on a large monitor stays usable on a
+  // small one.
+  useEffect(() => {
+    const onResize = () =>
+      setLayout((prev) =>
+        clampLayout(prev, layoutLimits, {
+          width: window.innerWidth,
+          height: window.innerHeight,
+        }),
+      );
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [layoutLimits]);
+
   const patch = useCallback((update: Partial<ControlState>) => {
     setState((prev) => {
       const next = { ...prev, ...update };
@@ -101,6 +140,18 @@ export default function Page() {
       .then(([configResult, sectorResult, benchmarkResult, healthResult]) => {
         if (cancelled) return;
         setConfig(configResult);
+        const limits: LayoutLimits = configResult.layout
+          ? {
+              left: configResult.layout.left,
+              bottom: {
+                min: configResult.layout.bottom.min,
+                default: configResult.layout.bottom.default,
+                maxPercent: configResult.layout.bottom.max_percent,
+              },
+            }
+          : FALLBACK_LIMITS;
+        setLayoutLimits(limits);
+        setLayout(loadLayout(limits));
         setSectors(sectorResult);
         setBenchmarks(benchmarkResult);
         setHealth(healthResult);
@@ -310,6 +361,22 @@ export default function Page() {
           onChange={patch}
         />
 
+        <ResizeHandle
+          orientation="vertical"
+          value={layout.leftWidth}
+          min={layoutLimits.left.min}
+          max={layoutLimits.left.max}
+          label="Resize control panel"
+          onChange={(next) => {
+            document.body.classList.add("resizing");
+            setLayout((prev) => ({ ...prev, leftWidth: next }));
+          }}
+          onCommit={(next) => {
+            document.body.classList.remove("resizing");
+            saveLayout({ ...layout, leftWidth: next });
+          }}
+        />
+
         <main className="main">
           <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
             <div className="chart-bar">
@@ -337,6 +404,17 @@ export default function Page() {
                   title="Reset zoom and pan"
                 >
                   Reset view
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    clearLayout();
+                    setLayout(defaultLayout(layoutLimits));
+                  }}
+                  title="Restore the default panel sizes"
+                >
+                  Reset layout
                 </button>
                 <button
                   type="button"
@@ -382,6 +460,7 @@ export default function Page() {
                 showArrows={state.showArrows}
                 selected={selected}
                 onSelect={handleSelect}
+                rendering={config?.rendering ?? null}
               />
 
               {(loading || error || !ready) && (
@@ -461,8 +540,30 @@ export default function Page() {
             onChange={(date) => setState((prev) => ({ ...prev, asOf: date }))}
           />
 
-          {data && (
+          <ResizeHandle
+            orientation="horizontal"
+            value={layout.bottomHeight}
+            min={layoutLimits.bottom.min}
+            max={Math.round(
+              (typeof window !== "undefined" ? window.innerHeight : 900) *
+                (layoutLimits.bottom.maxPercent / 100),
+            )}
+            label="Resize data panel"
+            invert
+            onChange={(next) => {
+              document.body.classList.add("resizing");
+              setLayout((prev) => ({ ...prev, bottomHeight: next }));
+            }}
+            onCommit={(next) => {
+              document.body.classList.remove("resizing");
+              saveLayout({ ...layout, bottomHeight: next });
+            }}
+          />
+
+          {data ? (
             <SectorTable data={data} selected={selected} onSelect={handleSelect} />
+          ) : (
+            <section className="table-panel" />
           )}
         </main>
       </div>
