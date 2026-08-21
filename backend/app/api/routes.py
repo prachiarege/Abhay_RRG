@@ -517,11 +517,22 @@ def refresh(
                 detail=f"unknown or unavailable symbols: {', '.join(missing)}",
             )
 
-    result = ingestion.refresh_prices(session, symbols=symbols, trigger="manual")
+    if payload.symbols:
+        # An explicit symbol list is a targeted repair, so honour it literally against the
+        # configured provider rather than running the primary/fallback sequence.
+        result = ingestion.refresh_prices(session, symbols=symbols, trigger="manual")
+        body = result.to_dict()
+    else:
+        # Routine refresh: NSE for the recent window, Yahoo for anything it cannot serve,
+        # plus deep history when the store is too thin to warm the engine up.
+        body = ingestion.refresh_indices(
+            session,
+            trigger="manual",
+            deep=payload.full_history or ingestion.needs_deep_history(session),
+        )
+
     # Prices changed, so every cached RRG payload is now potentially stale.
-    cleared = get_cache().clear()
-    body = result.to_dict()
-    body["cache_entries_cleared"] = cleared
+    body["cache_entries_cleared"] = get_cache().clear()
     return body
 
 

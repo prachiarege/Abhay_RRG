@@ -18,7 +18,7 @@ from .config import get_settings
 from .db import session_scope
 from .engine.params import RRGParams
 from .services.cache import get_cache
-from .services.ingestion import refresh_prices
+from .services.ingestion import needs_deep_history, refresh_indices
 from .services.rrg_service import persist_rotations
 
 logger = logging.getLogger(__name__)
@@ -37,10 +37,18 @@ def refresh_job(trigger: str = "scheduled") -> dict:
     summary: dict = {"trigger": trigger}
     try:
         with session_scope() as session:
-            result = refresh_prices(session, trigger=trigger)
-            summary["ingestion"] = result.status
-            summary["rows_written"] = result.rows_written
-            summary["failed"] = sorted(result.failed)
+            # NSE for the recent window, Yahoo for anything it cannot serve, plus deep
+            # history if the store is too thin to warm the engine up.
+            result = refresh_indices(
+                session, trigger=trigger, deep=needs_deep_history(session)
+            )
+            summary["ingestion"] = result.get("status")
+            summary["rows_written"] = result.get("rows_written", 0)
+            summary["steps"] = [
+                f"{step['role']}/{step['provider']}: "
+                f"{step.get('succeeded', step.get('error'))}"
+                for step in result.get("steps", [])
+            ]
 
             for frequency in ("daily", "weekly"):
                 try:

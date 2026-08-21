@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     #: Yahoo follows because it holds the deep history that NSE's day-file archive would
     #: take thousands of requests to reproduce.
     source_priority: str = "nse,yahoo,csv"
+    #: Provider used for the routine index refresh, and the one to fall back to when it
+    #: cannot serve a symbol (V2-DATA-002). Distinct from `data_provider`, which is the
+    #: single-provider default used by direct calls and by the constituent fetch.
+    index_provider: str = "nse"
+    index_fallback_provider: str = "yahoo"
+    #: How far back a routine NSE refresh reaches. The archive is one file per day, so this
+    #: is a request count -- but files are cached on disk, so a daily run only downloads the
+    #: new day. Wide enough to repair a multi-week provider gap without a manual backfill.
+    nse_refresh_window_days: int = 45
     csv_data_dir: str = str(DATA_ROOT / "csv")
     provider_timeout_seconds: int = 30
     history_years: int = 12

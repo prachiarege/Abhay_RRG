@@ -412,6 +412,121 @@ def last_ingestion(session: Session) -> dict | None:
     }
 
 
+def refresh_indices(
+    session: Session,
+    trigger: str = "manual",
+    deep: bool = False,
+) -> dict:
+    """Refresh index prices: primary provider first, fallback for whatever it cannot serve.
+
+    This is the routine refresh path, and it exists because the two providers are good at
+    different things:
+
+    *   **NSE** is the exchange itself and therefore authoritative, but its archive is one
+        file per trading day. Pulling twelve years would be roughly 3,000 requests.
+    *   **Yahoo** returns twelve years in a single request per symbol, but has dropped whole
+        months of sector-index data without backfilling.
+
+    So deep history comes from the fallback once, and every routine refresh pulls a recent
+    window from the primary. Because `source_priority` puts the primary first, its bars win
+    any date both cover, so a gap in the fallback provider is repaired automatically on the
+    next refresh rather than needing a manual backfill. This is the primary/fallback
+    behaviour SRS V2 6.4 asks for.
+
+    Args:
+        deep: also pull full history from the fallback provider. Set on first run, when
+            there is not yet enough history to warm the engine up.
+
+    Returns an ORDERED LIST of steps rather than one merged result. Merging would obscure
+    which provider supplied what -- the same transparency requirement that governs the
+    source merge itself -- and keying by provider name would let two steps that happen to
+    use the same provider silently overwrite each other.
+    """
+    from ..config import get_settings
+
+    settings = get_settings()
+    steps: list[dict] = []
+    summary: dict = {"trigger": trigger, "deep": deep, "steps": steps}
+
+    def record(role: str, provider_name: str, detail: dict) -> None:
+        steps.append({"role": role, "provider": provider_name, **detail})
+
+    # 1. Deep history from the fallback provider, when asked for.
+    if deep:
+        try:
+            fallback = get_provider(settings.index_fallback_provider)
+            result = refresh_prices(session, provider=fallback, trigger=trigger)
+            record("deep", fallback.name, result.to_dict())
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("deep history refresh failed")
+            record("deep", settings.index_fallback_provider, {"error": str(exc)})
+
+    # 2. Recent window from the primary provider.
+    primary_failures: set[str] = set()
+    primary_name = settings.index_provider
+    try:
+        primary = get_provider(primary_name)
+        window_start = date.today() - timedelta(days=settings.nse_refresh_window_days)
+        result = refresh_prices(
+            session, provider=primary, start=window_start, trigger=trigger
+        )
+        record("primary", primary.name, result.to_dict())
+        primary_failures = set(result.failed)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("primary index refresh failed")
+        record("primary", primary_name, {"error": str(exc)})
+        primary_failures = set(ingestable_symbols(session, provider=primary_name))
+
+    # 3. Fallback for whatever the primary could not serve.
+    fallback_name = settings.index_fallback_provider
+    if primary_failures and not deep and fallback_name != primary_name:
+        # Retrying the SAME provider for symbols it just failed on cannot help, so this step
+        # is skipped when primary and fallback are configured identically -- recording it
+        # would imply a fallback occurred when none did.
+        try:
+            fallback = get_provider(fallback_name)
+            available = ingestable_symbols(session, provider=fallback_name)
+            retry = {k: v for k, v in available.items() if k in primary_failures}
+            if retry:
+                logger.info(
+                    "falling back to %s for %d symbol(s) the primary could not serve",
+                    fallback_name,
+                    len(retry),
+                )
+                result = refresh_prices(
+                    session, provider=fallback, symbols=retry, trigger=trigger
+                )
+                record("fallback", fallback.name, result.to_dict())
+                summary["fell_back_for"] = sorted(retry)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("fallback refresh failed")
+            record("fallback", fallback_name, {"error": str(exc)})
+
+    summary["rows_written"] = sum(step.get("rows_written", 0) for step in steps)
+    summary["status"] = (
+        "success" if any(step.get("succeeded") for step in steps) else "failed"
+    )
+    return summary
+
+
+def needs_deep_history(session: Session, minimum_bars: int = 400) -> bool:
+    """Whether the store is too thin to warm the engine up.
+
+    A fresh install has nothing; an install whose provider only ever returned a short window
+    is equally unusable. Either way the answer is to pull deep history from the provider that
+    can supply it in one request.
+    """
+    from sqlalchemy import func
+
+    from ..config import get_settings
+
+    benchmark = get_settings().default_benchmark
+    bars = session.scalar(
+        select(func.count()).select_from(PriceData).where(PriceData.symbol == benchmark)
+    ) or 0
+    return bars < minimum_bars
+
+
 def refresh_sector_stocks(
     session: Session,
     sector_symbol: str,

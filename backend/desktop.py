@@ -119,26 +119,27 @@ def ensure_data() -> tuple[bool, str]:
         ]
     )
 
-    from app.services.ingestion import refresh_prices
+    from app.services.ingestion import refresh_indices
 
     try:
         with session_scope() as session:
-            result = refresh_prices(session, trigger="first-run")
+            # deep=True: twelve years from the provider that returns it in one request per
+            # symbol, then a recent window from the exchange archive layered on top.
+            result = refresh_indices(session, trigger="first-run", deep=True)
     except Exception as exc:  # noqa: BLE001
         logger.exception("first-run data load failed")
         return False, f"data download failed: {exc}"
 
-    if not result.succeeded:
-        detail = "; ".join(f"{k}: {v}" for k, v in list(result.failed.items())[:3])
-        return False, f"no data could be downloaded. {detail}"
+    if result.get("status") != "success":
+        return False, "no data could be downloaded. Check the internet connection."
 
-    message = (
-        f"downloaded {result.rows_written:,} rows for "
-        f"{len(result.succeeded)}/{len(result.requested)} symbols"
-    )
-    if result.failed:
-        message += f" ({len(result.failed)} unavailable)"
-    return True, message
+    rows = result.get("rows_written", 0)
+    parts = [
+        f"{step['provider']} {step.get('succeeded', 0)}/{step.get('requested', 0)}"
+        for step in result.get("steps", [])
+        if "requested" in step
+    ]
+    return True, f"downloaded {rows:,} rows ({', '.join(parts)})"
 
 
 def main() -> int:

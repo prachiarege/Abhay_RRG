@@ -24,6 +24,12 @@ os.environ["RRG_DATA_PROVIDER"] = "csv"
 os.environ["RRG_CSV_DATA_DIR"] = str(_CSV_DIR)
 os.environ["RRG_AUTO_REFRESH_ENABLED"] = "false"
 os.environ["RRG_RATE_LIMIT_PER_MINUTE"] = "0"  # disabled; the limiter has its own test
+# Pin the routine refresh to the CSV fixtures. Without this it would use the real default
+# (NSE primary, Yahoo fallback) and reach the network, which would make this suite
+# non-deterministic and dependent on an exchange archive being reachable.
+os.environ["RRG_INDEX_PROVIDER"] = "csv"
+os.environ["RRG_INDEX_FALLBACK_PROVIDER"] = "csv"
+os.environ["RRG_SOURCE_PRIORITY"] = "csv"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -326,12 +332,48 @@ def test_xlsx_export(client: TestClient):
 
 
 def test_manual_refresh(client: TestClient):
+    """A routine refresh reports per-provider results, not one merged total.
+
+    The shape is deliberately per-provider: merging a primary and a fallback run into a
+    single count would hide which provider actually supplied what, the same transparency
+    the source merge itself has to preserve (SRS V2 6.4).
+    """
     response = client.post("/api/refresh")
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] in ("success", "partial")
-    assert body["succeeded"] >= len(FIXTURE_SYMBOLS)
+
+    assert body["status"] == "success"
     assert "cache_entries_cleared" in body
+
+    # Ordered steps, each naming its role and provider. A dict keyed by provider name would
+    # let two steps that use the same provider overwrite one another.
+    steps = body["steps"]
+    assert steps, "a refresh must report what it did"
+    assert all("role" in step and "provider" in step for step in steps)
+
+    served = sum(step.get("succeeded", 0) for step in steps)
+    assert served >= len(FIXTURE_SYMBOLS)
+
+
+def test_refresh_skips_a_pointless_self_retry(client: TestClient):
+    """With primary and fallback set to the same provider, there is no fallback step.
+
+    Retrying the same provider for symbols it just failed on cannot succeed, and recording
+    the attempt would imply a fallback happened when none did.
+    """
+    body = client.post("/api/refresh").json()
+    roles = [step["role"] for step in body["steps"]]
+    assert "fallback" not in roles
+    assert roles.count("primary") == 1
+
+
+def test_targeted_refresh_keeps_the_single_result_shape(client: TestClient):
+    """An explicit symbol list is a targeted repair, so it bypasses primary/fallback."""
+    response = client.post("/api/refresh", json={"symbols": ["NIFTY_IT"]})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["succeeded"] == 1
+    assert body["requested"] == 1
 
 
 def test_refresh_rejects_unknown_symbols(client: TestClient):
