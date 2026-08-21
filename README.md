@@ -141,6 +141,7 @@ function, so history can be replayed without look-ahead.
 | [`docs/API.md`](docs/API.md) | Endpoint reference with response shapes |
 | [`docs/UI_UX_SPEC.md`](docs/UI_UX_SPEC.md) | Design decisions and rationale |
 | [`docs/DESKTOP_BUILD.md`](docs/DESKTOP_BUILD.md) | Single-user Windows build: what the end user needs (nothing), how packaging works, troubleshooting |
+| [`CLAUDE.md`](CLAUDE.md) | **Start here when picking this up cold.** Orientation, the traps already hit, and the decisions not to "simplify" |
 | [`docs/SRS_DEVIATIONS.md`](docs/SRS_DEVIATIONS.md) | **Read this first.** Every departure from the SRS (§1–6), 6 open client decisions (§7), and the 4 build-time assumptions taken without an answer (§9) |
 
 ---
