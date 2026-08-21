@@ -118,11 +118,26 @@ def ensure_data() -> tuple[bool, str]:
         # same-day relaunch downloads nothing.
         #
         # Three days of slack absorbs a weekend without pointless work on a Monday morning.
-        behind = latest is None or (date.today() - latest).days > 3
+        #
+        # The bar-count check matters more than the date check: a provider can resume
+        # publishing after an outage without backfilling, leaving every series with a
+        # current newest bar and a month missing from the middle. No date comparison finds
+        # that, and the hole suppresses RRG output for months.
+        from app.services.ingestion import incomplete_symbols
+
+        with session_scope() as session:
+            laggards = incomplete_symbols(session)
+
+        behind = latest is None or (date.today() - latest).days > 3 or bool(laggards)
         if not behind:
             return True, f"{rows:,} price rows on file, latest {latest}"
 
-        print("  Topping up market data...")
+        if laggards:
+            print(f"  {len(laggards)} series missing bars; topping up...")
+
+        else:
+            print("  Topping up market data...")
+
         from app.services.ingestion import refresh_indices
 
         try:

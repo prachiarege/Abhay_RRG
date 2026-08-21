@@ -509,6 +509,57 @@ def refresh_indices(
     return summary
 
 
+def incomplete_symbols(
+    session: Session,
+    window_days: int = 120,
+    tolerance: int = 2,
+) -> dict[str, int]:
+    """Tracked index symbols missing bars over the recent window.
+
+    Counting bars, rather than comparing latest dates, is the only check that finds the
+    failure this project actually hit. A provider can stop publishing for a month and then
+    resume WITHOUT backfilling: afterwards every symbol's newest bar is current, so both a
+    global "latest date" and a per-symbol one look perfectly healthy while a month is
+    missing from the middle of the series.
+
+    That hole is not cosmetic. A NaN anywhere in a rolling window nullifies that window, so
+    a four-week gap suppresses RRG output for the gap plus the warm-up chain behind it.
+
+    Comparing each symbol's bar count against the best-covered symbol over the same window
+    surfaces it regardless of where the missing days sit.
+
+    Returns {symbol: bars missing versus the best-covered symbol}.
+    """
+    from sqlalchemy import func
+
+    from ..seed import ingestable_symbols
+
+    since = date.today() - timedelta(days=window_days)
+    rows = session.execute(
+        select(PriceData.symbol, func.count(func.distinct(PriceData.date)))
+        .where(PriceData.date >= since)
+        .group_by(PriceData.symbol)
+    ).all()
+    if not rows:
+        return {}
+
+    # Only judge symbols a refresh would actually try to fetch. A constituent stock or an
+    # unmapped index being thin is not a fault to act on here.
+    tracked = set(ingestable_symbols(session)) | set(
+        ingestable_symbols(session, provider="nse")
+    )
+    counts = {symbol: int(n) for symbol, n in rows if symbol in tracked}
+    if not counts:
+        return {}
+
+    best = max(counts.values())
+    return {
+        symbol: best - n
+        for symbol, n in counts.items()
+        if best - n > tolerance
+    }
+
+
 def needs_deep_history(session: Session, minimum_bars: int = 400) -> bool:
     """Whether the store is too thin to warm the engine up.
 
