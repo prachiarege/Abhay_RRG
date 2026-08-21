@@ -8,7 +8,7 @@ configuration guide from SRS 53.
 ## 1. Pipeline
 
 ```
-        Market data providers  (Yahoo / CSV / licensed feed)
+     Market data providers  (NSE archive / Yahoo / CSV / licensed feed)
                      │
                      ▼
         ┌────────────────────────┐
@@ -67,8 +67,8 @@ no line of mathematics.
 | `app/engine/quadrants.py` | Classification, direction bucketing, rotation polarity |
 | `app/engine/rotation.py` | Quadrant-transition and centre-crossing detection |
 | `app/engine/stats.py` | Geometric relative returns, composite rotation score |
-| `app/providers/` | `DataProvider` ABC + Yahoo / CSV / NSE implementations |
-| `app/services/ingestion.py` | Fetch, validate, upsert, audit-log; price loading |
+| `app/providers/` | `DataProvider` ABC + NSE archive / Yahoo / CSV implementations |
+| `app/services/ingestion.py` | Fetch, validate, upsert, audit-log; priority-ordered multi-source price loading |
 | `app/services/validation.py` | SRS 27 data-quality checks |
 | `app/services/resample.py` | Daily/weekly conversion, cross-series weekly alignment |
 | `app/services/calendar.py` | Trading-session logic and holiday warnings |
@@ -76,7 +76,8 @@ no line of mathematics.
 | `app/services/rrg_service.py` | Request → payload orchestration, playback, export rows |
 | `app/api/` | Routers, dependency wiring, parameter validation, auth |
 | `app/scheduler.py` | Daily post-close refresh (APScheduler) |
-| `app/seed.py` | Initial sector/benchmark universe |
+| `app/seed.py` | Initial sector/benchmark universe, per-provider identifier maps |
+| `app/migrations.py` | Additive-only column migrations (see below) |
 
 ---
 
@@ -106,8 +107,8 @@ Two deliberate departures from SRS 32:
    remembers.
 2. **A `source` column.** SRS 5.4 mandates multiple providers but the suggested schema had
    nowhere to record which one supplied a row, making vendor disagreements undebuggable.
-   `load_close_series` prefers the configured provider and never mixes sources within one
-   series.
+   It is also what makes the priority-ordered merge below auditable: every bar records who
+   supplied it, so a spliced series can be taken apart again.
 
 `adjusted_close` is retained for when the universe extends beyond indices; it is
 meaningless for an index.
@@ -136,8 +137,29 @@ overrides (SRS 40).
 
 ### Migrations
 
-MVP uses `Base.metadata.create_all`. Alembic should replace it before the schema starts
-evolving in production; the models are written to be migration-friendly.
+`Base.metadata.create_all` creates missing tables but **never alters an existing one**, so an
+installed database silently keeps the old shape after a model change. `app/migrations.py`
+closes that hole for the only change made so far — adding a nullable column — and is
+deliberately limited to exactly that: additive, nullable, idempotent, no data rewrites.
+
+**Alembic is still the right answer**, and the boundary is explicit: the moment a change
+needs a data migration, a non-null default, a rename or a type change, stop extending that
+file and introduce Alembic.
+
+### Multi-source price loading
+
+A symbol can hold bars from several providers. `load_close_series` merges them in
+`RRG_SOURCE_PRIORITY` order (default `nse,yahoo,csv`): the highest-priority source wins each
+date, lower ones fill only the dates it lacks, and an unlisted source is still used after the
+listed ones rather than ignored.
+
+This exists because the deep history and the current tail can legitimately come from
+different places — Yahoo holds twelve years, NSE has the days Yahoo dropped. SRS V2 6.4
+forbids a series *silently* alternating between providers, so the merge is reported:
+`source_breakdown` gives each provider's actual contribution and `/api/health` exposes it.
+
+Pass `source=` to pin a series to one provider exactly, which is what reproducibility work
+should do.
 
 ---
 
@@ -208,7 +230,8 @@ so the UI never hard-codes them either.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `RRG_DATA_PROVIDER` | `yahoo` | `yahoo` \| `csv` \| `nse` |
+| `RRG_DATA_PROVIDER` | `yahoo` | provider used for *fetching*: `nse` \| `yahoo` \| `csv` |
+| `RRG_SOURCE_PRIORITY` | `nse,yahoo,csv` | precedence when *reading* stored bars from several sources |
 | `RRG_CSV_DATA_DIR` | `backend/data/csv` | one `<PROVIDER_SYMBOL>.csv` per series |
 | `RRG_HISTORY_YEARS` | 12 | initial fetch window |
 | `RRG_DATABASE_URL` | SQLite in `backend/data/` | `postgresql+psycopg://…` for production |

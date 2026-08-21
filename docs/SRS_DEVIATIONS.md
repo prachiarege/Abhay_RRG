@@ -5,40 +5,97 @@ Every place this implementation departs from the SRS, with the reason. Read this
 
 ---
 
-## 1. Yahoo Finance is not viable as the production data source
+## 1. Data source — resolved with the NSE archive (free)
 
-**Two independent problems, both verified against the live feed on 19 Aug 2026.**
+**Status: closed.** Originally recorded as the project's biggest risk. It was, and it is now
+fixed at no cost.
 
-### 1.1 Licensing
+### 1.1 What was wrong
 
-Yahoo's terms do not permit redistribution or commercial use. For a product shown to
-investors, advisors and portfolio managers, a licensed feed (NSE Data Services or a
-redistributor) is required. This is a contract and budget item with lead time, not an
-engineering task.
+Yahoo Finance was the only provider. Two problems:
 
-### 1.2 Coverage and freshness — worse than expected
+*   **Licensing** — Yahoo's terms permit neither redistribution nor commercial use.
+*   **Coverage and reliability** — 3 of the 17 SRS 2.1 sectors never resolved at all, and
+    Yahoo stopped publishing a whole class of NSE sector indices between 18 Jul and 18 Aug
+    2026, resuming without backfilling the gap.
 
-Of the 17 sectors in SRS 2.1, **14 resolve on Yahoo and 3 do not**: NIFTY Oil & Gas,
-NIFTY Consumer Durables, NIFTY Healthcare. These are seeded `active = false` with the
-reason recorded, so the gap is visible in the admin list rather than presenting as an empty
-chart. Of the benchmarks in SRS 2.2, NIFTY Midcap 150 and Smallcap 250 do not resolve
-either; only NIFTY Midcap 50 is available as a mid-cap proxy.
+The second was materially worse than "stale data". A NaN anywhere in a rolling window
+nullifies that window, so a four-week hole suppressed RRG output for the hole plus the
+warm-up chain behind it. Measured: **seven of ten default sectors had no valid weekly point
+after 17 Jul**, and would not have recovered until roughly December.
 
-More seriously, **Yahoo stopped updating a whole class of NSE sector symbols for roughly a
-month** (18 Jul – 18 Aug 2026), resuming only on 19 Aug. The split is clean:
+### 1.2 The fix
 
-| Fresh through 14 Aug | Stale — 31 sessions missing |
-|---|---|
-| NIFTY 50, 100, 500, Bank, IT, Pharma | Auto, FMCG, Metal, Realty, Media, Energy, Infra, PSU Bank, Private Bank, Commodities |
+NSE publishes the data itself:
 
-That is **7 of the 10 default on-screen sectors** a month behind. The application detects
-and reports this (`is_stale` / `bars_behind` per sector, a banner, and per-row flags), so
-nobody is misled — but a sector-rotation tool whose sectors are a month stale is not
-usable for its purpose.
+```
+https://archives.nseindia.com/content/indices/ind_close_all_DDMMYYYY.csv
+```
 
-**Recommendation:** treat Yahoo as the development fixture only. For anything
-client-facing, either license a feed or schedule NSE index archives into the CSV provider's
-directory. The provider abstraction means this is a config change plus one class.
+One file per trading day, **161 indices**, full OHLC, free, no account. Verified against a
+date inside the gap, and cross-checked against Yahoo on overlapping days:
+
+| Index | NSE close | Yahoo close | Difference |
+|---|---|---|---|
+| Nifty 500 | 23386.20 | 23386.20 | 0.0000% |
+| Nifty IT | 30433.05 | 30433.05 | 0.0000% |
+| Nifty Bank | 57239.75 | 57239.75 | 0.0000% |
+
+That agreement is load-bearing, not trivia: it means splicing the two sources introduces no
+discontinuity in the relative-strength series. A price mismatch at the join would have shown
+up as a fake jump in RS-Ratio.
+
+**Result: zero stale sectors**, and the universe widened — Oil & Gas, Consumer Durables and
+Healthcare (SRS 2.1) plus Midcap 150 and Smallcap 250 (SRS 2.2) are now available on
+NSE-only mappings. 17/17 sectors, 6/6 benchmarks.
+
+### 1.3 Why merge sources rather than pick one
+
+Yahoo holds twelve years; NSE's day-file archive would need ~3,000 requests to reproduce
+that. NSE has the missing days and is authoritative. Refusing to merge would mean choosing
+between a long series with a hole and a short series without one — and the hole is far more
+damaging, for the rolling-window reason above.
+
+So sources merge in configured priority order (`nse,yahoo,csv`), higher priority winning per
+date. SRS V2 6.4 forbids a series *silently* alternating between providers; the honest way
+to satisfy that is to make it visible, so `source_breakdown` reports each provider's actual
+contribution (not raw row counts) and `/api/health` surfaces it.
+
+### 1.4 Dhan — evaluated, not adopted
+
+The V2 SRS asked for Dhan. It was investigated in full and deliberately not adopted:
+
+*   **Its Data API is a paid subscription — ₹499/month + taxes.** Historical OHLC and market
+    quotes both sit behind it; without it the endpoints return `DH-902 / not subscribed`.
+    The client's account did not have it active.
+*   **The SRS's own credential example points at the wrong flow.** §10.3 and Appendix A.2
+    specify `DHAN_API_KEY` / `DHAN_API_SECRET`, which belong to the OAuth consent flow —
+    and Dhan's docs are explicit that its second step *"needs to be opened directly on a
+    browser"* with credential entry plus 2FA. That cannot be automated, so it cannot satisfy
+    V2-DATA-003 as written.
+*   **The automatable path is TOTP:** `POST https://auth.dhan.co/app/generateAccessToken`
+    with client id, Dhan PIN and a locally-computed TOTP code, returning a 24-hour token. It
+    requires TOTP enabled on the account, and means storing the PIN *and* the TOTP seed
+    locally — which collapses both factors into one store. Recommended location if ever
+    implemented: Windows Credential Manager (DPAPI), never a file in the project tree.
+*   `RenewToken` is documented as working only for tokens generated from Dhan Web, so the
+    design would have to re-generate daily rather than renew.
+*   Documented rate limits: Data APIs 5/sec and 100,000/day; Quote 1/sec.
+
+**When Dhan would become worth it:** intraday RRG or live quotes, neither of which is in
+scope (SRS V2 5.2 lists intraday as explicitly out). For daily index and equity closes, the
+free exchange archive is both cheaper and more authoritative.
+
+### 1.5 Remaining caveats
+
+*   The archive is a **published file set, not a contracted API** — no SLA, browser-like
+    headers needed, and NSE could restrict it. Fine for a single-user local tool; a
+    commercial product should hold a licence.
+*   **Licensing still needs confirming before this is client-facing.** Using publicly
+    published files in an internal tool is not the same as redistributing them, but NSE does
+    licence data commercially and that question is not mine to settle.
+*   Equity constituents still come from Yahoo, where coverage is good and current. NSE
+    bhavcopy is the equivalent free route if that ever changes.
 
 ---
 

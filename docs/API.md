@@ -238,6 +238,22 @@ Status, provider, database backend, `last_updated_utc` and `last_updated_ist` (s
 rendered IST per SRS 29), per-symbol data freshness, cache statistics and the last
 ingestion summary.
 
+Also carries **provider provenance** (SRS V2 6.4):
+
+```json
+{
+  "source_priority": ["nse", "yahoo", "csv"],
+  "sources": {
+    "nse":   { "symbols": 23, "rows": 871,    "latest_date": "2026-08-20" },
+    "yahoo": { "symbols": 72, "rows": 181001, "latest_date": "2026-08-20" }
+  }
+}
+```
+
+A series may draw on more than one provider — the higher-priority source wins each date and
+lower ones fill only what it lacks. 6.4 forbids that happening *silently*, so this endpoint
+states who supplied what. `source_priority` is the configured precedence.
+
 ---
 
 ## `GET /api/rotations`

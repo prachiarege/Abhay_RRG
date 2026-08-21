@@ -47,27 +47,54 @@ Open <http://localhost:3000>. API docs at <http://localhost:8000/docs>.
 
 ```bash
 # --- tests ---
-cd backend  && .venv/Scripts/python -m pytest -q      # 102 tests
+cd backend  && .venv/Scripts/python -m pytest -q      # 116 tests
 cd frontend && npx tsc --noEmit && npm run build
 ```
 
 ---
 
-## Read this before trusting the numbers
+## Where the data comes from
 
-**The default data provider is not production-grade.** Yahoo Finance is wired up because it
-works with no key and no contract, which is what a development build needs. Two problems
-make it unsuitable for anything client-facing:
+**Primary: the NSE archive.** NSE publishes one CSV per trading day containing every index
+it calculates, free and with no account:
 
-1. **Licensing** — Yahoo's terms forbid redistribution and commercial use.
-2. **Coverage** — 3 of the 17 SRS sectors are absent entirely, and Yahoo stopped updating a
-   whole class of NSE sector symbols for roughly a month in Jul–Aug 2026. At the time of
-   writing that left **7 of the 10 default sectors four weeks stale**.
+```
+https://archives.nseindia.com/content/indices/ind_close_all_DDMMYYYY.csv
+```
 
-The application detects and displays this — stale sectors are flagged in the table and
-named in a banner — so nobody is misled. But a sector-rotation tool needs current sectors.
-Moving to a licensed NSE feed, or scheduling NSE archives into the CSV provider, is a config
-change plus one class. See [`docs/SRS_DEVIATIONS.md`](docs/SRS_DEVIATIONS.md) §1.
+161 indices, full OHLC, straight from the exchange. Cross-checked against Yahoo on
+overlapping days: identical to the paise.
+
+**Fallback: Yahoo Finance**, which holds twelve years of history that NSE's day-file
+archive would take thousands of requests to reproduce. Sources are merged in configured
+priority order (`RRG_SOURCE_PRIORITY`, default `nse,yahoo,csv`) — the higher-priority
+source wins each date, lower ones fill only what it lacks — and the merge is reported
+rather than hidden: `/api/health` shows exactly how many bars each provider contributed.
+
+### Why this matters (and what it fixed)
+
+Yahoo alone is not sufficient. It stopped publishing a whole class of NSE sector indices for
+a month and never backfilled the gap. The consequence was worse than a stale reading: a NaN
+anywhere in a rolling window nullifies that window, so a four-week hole suppressed RRG
+output for the hole *plus* the warm-up chain behind it. Seven of ten default sectors had **no
+valid weekly point at all** after 17 Jul, and would not have recovered until roughly
+December.
+
+Adding NSE closed the gap, and widened the universe as a side effect: **Oil & Gas, Consumer
+Durables and Healthcare** — the three SRS 2.1 sectors Yahoo never carried — plus the
+**Midcap 150 and Smallcap 250** benchmarks from SRS 2.2 are now available. 17/17 sectors and
+6/6 benchmarks, up from 14 and 4.
+
+### Honest caveats
+
+- The archive is a **published file set, not a contracted API**: no SLA, browser-like
+  headers required, and NSE could restrict it. Right for a single-user local tool; a
+  commercial product should hold a data licence.
+- **Dhan was evaluated and not adopted.** Its Data API costs ₹499/month and its historical
+  endpoints require that subscription. The adapter seam remains, and Dhan becomes worth it
+  if intraday or live quotes are ever needed — see
+  [`docs/SRS_DEVIATIONS.md`](docs/SRS_DEVIATIONS.md) §1 for the full evaluation, including
+  which of its authentication flows can actually be automated.
 
 ---
 
@@ -76,7 +103,8 @@ change plus one class. See [`docs/SRS_DEVIATIONS.md`](docs/SRS_DEVIATIONS.md) §
 **Engine** — RS, RS-Ratio, RS-Momentum, quadrants, direction, rotation detection, geometric
 relative returns, composite score. Every transform is finite-window and causal.
 
-**Data** — provider abstraction (Yahoo / CSV / NSE stub), validation for duplicates, gaps,
+**Data** — provider abstraction (NSE archive / Yahoo / CSV), priority-ordered
+multi-source merging with reported provenance, validation for duplicates, gaps,
 non-positive values, implausible spikes and non-session bars, dialect-aware upsert, audit
 log, scheduled post-close refresh.
 
@@ -162,7 +190,7 @@ AAR Project/
 │   │   ├── models.py        # SQLAlchemy schema
 │   │   ├── config.py        # all settings, env-driven
 │   │   └── main.py
-│   ├── tests/               # 102 tests
+│   ├── tests/               # 116 tests
 │   ├── scripts/ingest.py    # CLI data loader
 │   └── config/nse_holidays.json
 ├── frontend/

@@ -150,16 +150,19 @@ PyInstaller bundles are a known false-positive source. UPX compression — the b
 trigger — is disabled in the spec for exactly this reason. If a scanner still objects, an
 exclusion for the folder is the usual remedy.
 
-### The data limitation still applies
+### Where the data comes from
 
-The bundled provider is the free public feed, which is unreliable for several NSE sector
-indices — at the time of building, 7 of the 10 default sectors were four weeks stale. The
-app flags every stale sector in the table and in a banner. **Those warnings are the app
-working correctly, not a bug.** See `SRS_DEVIATIONS.md` §1.
+Index data comes from **NSE's own daily archive** (free, no account), with Yahoo Finance as a
+fallback holding the deeper history. Sources are merged in priority order and the app reports
+which provider supplied what.
 
-For dependable data, put a licensed feed behind the same provider interface, or drop NSE
-archive CSVs into `%LOCALAPPDATA%\SectorRRG\csv\` and set `RRG_DATA_PROVIDER=csv` in
-`%LOCALAPPDATA%\SectorRRG\.env`.
+If a sector ever *does* fall behind, the app flags it in the table and in a banner above the
+chart. **Those warnings are the app working correctly, not a bug** — they mean the provider
+has a gap, and they matter because a gap suppresses RRG output for months, not days. See
+`SRS_DEVIATIONS.md` §1.
+
+The archive needs an internet connection but no credentials. Day files are cached under
+`%LOCALAPPDATA%\SectorRRG\nse_archive\`, so a re-run costs nothing.
 
 ### Drilling into a sector's stocks
 
