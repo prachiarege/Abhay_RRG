@@ -146,6 +146,24 @@ def seed_universe(session: Session, overwrite: bool = False) -> dict[str, int]:
 
     for (symbol, name, display, short, provider_symbol, is_default, active, order, colour) in SECTORS:
         existing = session.scalar(select(Sector).where(Sector.symbol == symbol))
+
+        if existing is not None and existing.provider_symbols is None:
+            # Upgrade path. `overwrite` deliberately never touches operator-controlled
+            # fields, but a row that predates per-provider mapping has NEVER had these set,
+            # so filling them in is completing an install rather than overriding a choice.
+            # Without this an existing database gets the new column and no data, and every
+            # provider that needs an explicit mapping resolves zero symbols.
+            existing.provider_symbols = provider_symbol_map(symbol, provider_symbol)
+            existing.index_type = existing.index_type or "sector"
+            if active and not existing.active:
+                # This row was inactive because the old single provider could not serve it,
+                # not because anyone chose to disable it. A configured provider can now.
+                existing.active = True
+                logger.info(
+                    "activating %s: a configured provider now serves it", symbol
+                )
+            created["updated"] += 1
+
         if existing is None:
             session.add(
                 Sector(
@@ -180,6 +198,18 @@ def seed_universe(session: Session, overwrite: bool = False) -> dict[str, int]:
 
     for (symbol, name, display, provider_symbol, is_default, active, order) in BENCHMARKS:
         existing = session.scalar(select(Benchmark).where(Benchmark.symbol == symbol))
+
+        if existing is not None and existing.provider_symbols is None:
+            # See the sector branch above.
+            existing.provider_symbols = provider_symbol_map(symbol, provider_symbol)
+            existing.index_type = existing.index_type or "broad_market"
+            if active and not existing.active:
+                existing.active = True
+                logger.info(
+                    "activating benchmark %s: a configured provider now serves it", symbol
+                )
+            created["updated"] += 1
+
         if existing is None:
             session.add(
                 Benchmark(
