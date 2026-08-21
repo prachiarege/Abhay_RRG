@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import webbrowser
+from datetime import date
 from pathlib import Path
 
 # When frozen, PyInstaller has already put the bundle on sys.path. When run from source,
@@ -109,7 +110,40 @@ def ensure_data() -> tuple[bool, str]:
     if rows > 0:
         with session_scope() as session:
             latest = session.scalar(select(func.max(PriceData.date)))
-        return True, f"{rows:,} price rows on file, latest {latest}"
+
+        # Top up if the store has fallen behind. Two cases make this worth doing at launch
+        # rather than waiting for the user to press Refresh: a desktop app is often opened
+        # days apart, and an upgrade can leave correct-looking but stale data (an index the
+        # previous version had no provider for). The archive's day files are cached, so a
+        # same-day relaunch downloads nothing.
+        #
+        # Three days of slack absorbs a weekend without pointless work on a Monday morning.
+        behind = latest is None or (date.today() - latest).days > 3
+        if not behind:
+            return True, f"{rows:,} price rows on file, latest {latest}"
+
+        print("  Topping up market data...")
+        from app.services.ingestion import refresh_indices
+
+        try:
+            with session_scope() as session:
+                result = refresh_indices(session, trigger="startup", deep=False)
+            with session_scope() as session:
+                latest = session.scalar(select(func.max(PriceData.date)))
+            added = result.get("rows_written", 0)
+            if result.get("status") == "success":
+                return True, f"{rows + added:,} price rows on file, latest {latest}"
+            # A failed top-up is not fatal: the stored history is still usable and the app
+            # flags anything stale on the chart itself.
+            return True, (
+                f"{rows:,} price rows on file, latest {latest} "
+                "(top-up failed; use Refresh data when back online)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("startup top-up failed: %s", exc)
+            return True, (
+                f"{rows:,} price rows on file, latest {latest} (top-up failed)"
+            )
 
     banner(
         [
