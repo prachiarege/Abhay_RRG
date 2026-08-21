@@ -51,10 +51,12 @@ SECTORS: tuple[tuple, ...] = (
     ("NIFTY_PSU_BANK",    "NIFTY PSU Bank",           "PSU Bank",     "PSUBNK", "^CNXPSUBANK",          False, True, 120, "#818cf8"),
     ("NIFTY_PVT_BANK",    "NIFTY Private Bank",       "Private Bank", "PVTBNK", "NIFTY_PVT_BANK.NS",    False, True, 130, "#38bdf8"),
     ("NIFTY_COMMODITIES", "NIFTY Commodities",        "Commodities",  "COMDTY", "^CNXCMDT",             False, True, 140, "#fb923c"),
-    # In SRS 2.1 but unavailable from the default provider. Seeded inactive on purpose.
-    ("NIFTY_OIL_GAS",     "NIFTY Oil & Gas",          "Oil & Gas",    "OILGAS", "UNAVAILABLE_OILGAS",   False, False, 150, "#fbbf24"),
-    ("NIFTY_CONSUMER_DUR","NIFTY Consumer Durables",  "Cons Durables","CONDUR", "UNAVAILABLE_CONSDUR",  False, False, 160, "#c084fc"),
-    ("NIFTY_HEALTHCARE",  "NIFTY Healthcare",         "Healthcare",   "HEALTH", "UNAVAILABLE_HEALTH",   False, False, 170, "#4ade80"),
+    # Yahoo carries none of these three, but the NSE archive does -- verified against a
+    # live file. They are active now, with no Yahoo entry in `provider_symbols`, so a
+    # Yahoo-only refresh skips them while an NSE refresh picks them up.
+    ("NIFTY_OIL_GAS",     "NIFTY Oil & Gas",          "Oil & Gas",    "OILGAS", "UNAVAILABLE_OILGAS",   False, True,  150, "#fbbf24"),
+    ("NIFTY_CONSUMER_DUR","NIFTY Consumer Durables",  "Cons Durables","CONDUR", "UNAVAILABLE_CONSDUR",  False, True,  160, "#c084fc"),
+    ("NIFTY_HEALTHCARE",  "NIFTY Healthcare",         "Healthcare",   "HEALTH", "UNAVAILABLE_HEALTH",   False, True,  170, "#4ade80"),
 )
 
 # (symbol, name, display, provider_symbol, is_default, active, order)
@@ -63,13 +65,72 @@ BENCHMARKS: tuple[tuple, ...] = (
     ("NIFTY50",      "NIFTY 50",        "NIFTY 50",        "^NSEI",      False, True,  20),
     ("NIFTY100",     "NIFTY 100",       "NIFTY 100",       "^CNX100",    False, True,  30),
     ("NIFTYMIDCAP50","NIFTY Midcap 50", "NIFTY Midcap 50", "^NSEMDCP50", False, True,  40),
-    # SRS 2.2 asks for Midcap 150 and Smallcap 250; neither resolves on Yahoo. Seeded
-    # inactive so the intent is recorded and a licensed feed can switch them on.
-    ("NIFTYMIDCAP150", "NIFTY Midcap 150",   "NIFTY Midcap 150",   "UNAVAILABLE_MID150",   False, False, 50),
-    ("NIFTYSMLCAP250", "NIFTY Smallcap 250", "NIFTY Smallcap 250", "UNAVAILABLE_SMALL250", False, False, 60),
+    # SRS 2.2 asks for these two; neither resolves on Yahoo, but both are in the NSE
+    # archive, so they are active with an NSE-only mapping.
+    ("NIFTYMIDCAP150", "NIFTY Midcap 150",   "NIFTY Midcap 150",   "UNAVAILABLE_MID150",   False, True,  50),
+    ("NIFTYSMLCAP250", "NIFTY Smallcap 250", "NIFTY Smallcap 250", "UNAVAILABLE_SMALL250", False, True,  60),
 )
 
 UNAVAILABLE_PREFIX = "UNAVAILABLE_"
+
+#: Providers whose identifiers come from their own namespace, where guessing is wrong.
+#: NSE keys on its own index names ("Nifty IT"), Dhan on numeric security ids -- handing
+#: either a Yahoo ticker would make them search for an index literally called "^CNXIT".
+#:
+#: Everything else accepts the generic symbol: Yahoo because the legacy column always held
+#: a Yahoo ticker, and CSV because it keys on a filename the operator chooses. Those may
+#: fall back to `provider_symbol` when the map has no explicit entry.
+NAMESPACED_PROVIDERS = frozenset({"nse", "dhan"})
+
+#: NSE's own spelling of each index in ind_close_all_DDMMYYYY.csv, verified against a live
+#: archive file. These become the `nse` entries in `provider_symbols`.
+#:
+#: Note what this unlocks: NSE publishes ~161 indices against Yahoo's 14, so the three
+#: sectors SRS 2.1 asked for that Yahoo never carried (Oil & Gas, Consumer Durables,
+#: Healthcare) become reachable, as do the Midcap 150 and Smallcap 250 benchmarks.
+NSE_INDEX_NAMES: dict[str, str] = {
+    # sectors
+    "NIFTY_AUTO": "Nifty Auto",
+    "NIFTY_BANK": "Nifty Bank",
+    "NIFTY_FMCG": "Nifty FMCG",
+    "NIFTY_IT": "Nifty IT",
+    "NIFTY_PHARMA": "Nifty Pharma",
+    "NIFTY_METAL": "Nifty Metal",
+    "NIFTY_REALTY": "Nifty Realty",
+    "NIFTY_MEDIA": "Nifty Media",
+    "NIFTY_ENERGY": "Nifty Energy",
+    "NIFTY_INFRA": "Nifty Infrastructure",
+    "NIFTY_FINSERV": "Nifty Financial Services",
+    "NIFTY_PSU_BANK": "Nifty PSU Bank",
+    "NIFTY_PVT_BANK": "Nifty Private Bank",
+    "NIFTY_COMMODITIES": "Nifty Commodities",
+    "NIFTY_OIL_GAS": "Nifty Oil & Gas",
+    "NIFTY_CONSUMER_DUR": "Nifty Consumer Durables",
+    "NIFTY_HEALTHCARE": "Nifty Healthcare Index",
+    # benchmarks
+    "NIFTY500": "Nifty 500",
+    "NIFTY50": "Nifty 50",
+    "NIFTY100": "Nifty 100",
+    "NIFTYMIDCAP50": "Nifty Midcap 50",
+    "NIFTYMIDCAP150": "Nifty Midcap 150",
+    "NIFTYSMLCAP250": "Nifty Smallcap 250",
+}
+
+
+def provider_symbol_map(symbol: str, yahoo_symbol: str) -> dict:
+    """Build the per-provider identifier map for one index (V2-DATA-001).
+
+    A placeholder Yahoo symbol is omitted rather than stored, so an absent key means
+    "this provider has no identifier for this index" instead of "the identifier is a
+    magic string the caller must remember to check".
+    """
+    mapping: dict[str, object] = {}
+    if not yahoo_symbol.startswith(UNAVAILABLE_PREFIX):
+        mapping["yahoo"] = yahoo_symbol
+    nse_name = NSE_INDEX_NAMES.get(symbol)
+    if nse_name:
+        mapping["nse"] = nse_name
+    return mapping
 
 
 def seed_universe(session: Session, overwrite: bool = False) -> dict[str, int]:
@@ -93,7 +154,11 @@ def seed_universe(session: Session, overwrite: bool = False) -> dict[str, int]:
                     display_name=display,
                     short_name=short,
                     provider_symbol=provider_symbol,
+                    provider_symbols=provider_symbol_map(symbol, provider_symbol),
                     exchange="NSE",
+                    index_type="sector",
+                    benchmark_allowed=False,
+                    sector_analysis_allowed=True,
                     benchmark_group="NSE_SECTORAL",
                     is_default=is_default,
                     active=active,
@@ -107,6 +172,8 @@ def seed_universe(session: Session, overwrite: bool = False) -> dict[str, int]:
             existing.display_name = display
             existing.short_name = short
             existing.provider_symbol = provider_symbol
+            existing.provider_symbols = provider_symbol_map(symbol, provider_symbol)
+            existing.index_type = existing.index_type or "sector"
             existing.sort_order = order
             existing.color = colour
             created["updated"] += 1
@@ -120,7 +187,9 @@ def seed_universe(session: Session, overwrite: bool = False) -> dict[str, int]:
                     benchmark_name=name,
                     display_name=display,
                     provider_symbol=provider_symbol,
+                    provider_symbols=provider_symbol_map(symbol, provider_symbol),
                     exchange="NSE",
+                    index_type="broad_market",
                     is_default=is_default,
                     active=active,
                     sort_order=order,
@@ -131,6 +200,8 @@ def seed_universe(session: Session, overwrite: bool = False) -> dict[str, int]:
             existing.benchmark_name = name
             existing.display_name = display
             existing.provider_symbol = provider_symbol
+            existing.provider_symbols = provider_symbol_map(symbol, provider_symbol)
+            existing.index_type = existing.index_type or "broad_market"
             existing.sort_order = order
             created["updated"] += 1
 
@@ -138,17 +209,48 @@ def seed_universe(session: Session, overwrite: bool = False) -> dict[str, int]:
     return created
 
 
-def ingestable_symbols(session: Session) -> dict[str, str]:
-    """{canonical symbol: provider symbol} for every active row worth fetching.
+def _resolve(row, provider: str | None) -> str | None:
+    """The identifier `provider` uses for this index, or None if it has none.
 
-    Placeholder provider symbols are filtered out so a refresh does not waste requests
-    on indices the configured provider is known not to carry.
+    Falls back to the legacy single `provider_symbol` column so rows seeded before
+    `provider_symbols` existed keep working -- but only for Yahoo, since that column
+    always held a Yahoo ticker. Handing a Yahoo ticker to NSE would make it search the
+    archive for an index literally named "^CNXIT".
     """
+    mapping = row.provider_symbols or {}
+    if provider:
+        value = mapping.get(provider)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, dict):
+            # Structured identifiers (Dhan: security_id + exchange_segment) belong to
+            # their own adapter, not to this flat-symbol path.
+            return None
+        if provider in NAMESPACED_PROVIDERS:
+            return None
+    if row.provider_symbol.startswith(UNAVAILABLE_PREFIX):
+        return None
+    return row.provider_symbol
+
+
+def ingestable_symbols(session: Session, provider: str | None = None) -> dict[str, str]:
+    """{canonical symbol: provider symbol} for every active row this provider can serve.
+
+    Indices the provider has no identifier for are omitted rather than attempted, so a
+    missing mapping shows up as a smaller universe rather than a pile of per-symbol errors.
+    """
+    if provider is None:
+        from .config import get_settings
+
+        provider = get_settings().data_provider
+
     out: dict[str, str] = {}
     for sector in session.scalars(select(Sector).where(Sector.active.is_(True))):
-        if not sector.provider_symbol.startswith(UNAVAILABLE_PREFIX):
-            out[sector.symbol] = sector.provider_symbol
+        resolved = _resolve(sector, provider)
+        if resolved:
+            out[sector.symbol] = resolved
     for benchmark in session.scalars(select(Benchmark).where(Benchmark.active.is_(True))):
-        if not benchmark.provider_symbol.startswith(UNAVAILABLE_PREFIX):
-            out[benchmark.symbol] = benchmark.provider_symbol
+        resolved = _resolve(benchmark, provider)
+        if resolved:
+            out[benchmark.symbol] = resolved
     return out

@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Date,
     DateTime,
@@ -49,8 +50,25 @@ class Sector(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     sector_name: Mapped[str] = mapped_column(String(128), nullable=False)
     symbol: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    #: Legacy single-provider symbol, retained so existing rows and queries keep working.
+    #: `provider_symbols` is the forward-looking field -- see the note below.
     provider_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Per-provider identifiers (V2-DATA-001): {"yahoo": "^CNXIT", "nse": "Nifty IT",
+    #: "dhan": {"security_id": "29", "exchange_segment": "IDX_I"}}.
+    #:
+    #: A JSON column rather than a child table because the shape genuinely differs per
+    #: provider -- Yahoo needs one ticker, Dhan needs an id plus a segment -- and a
+    #: normalised table would either force a lowest-common-denominator schema or a
+    #: key/value soup. Provider identifiers are also read as a whole, never queried
+    #: across, so there is nothing to gain from normalising them.
+    provider_symbols: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     exchange: Mapped[str] = mapped_column(String(16), default="NSE", nullable=False)
+    #: SRS V2 6.2 fields.
+    index_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    benchmark_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sector_analysis_allowed: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
     benchmark_group: Mapped[str | None] = mapped_column(String(64), nullable=True)
     display_name: Mapped[str] = mapped_column(String(64), nullable=False)
     short_name: Mapped[str] = mapped_column(String(24), nullable=False)
@@ -74,7 +92,10 @@ class Benchmark(Base):
     benchmark_name: Mapped[str] = mapped_column(String(128), nullable=False)
     symbol: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     provider_symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: See Sector.provider_symbols.
+    provider_symbols: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     exchange: Mapped[str] = mapped_column(String(16), default="NSE", nullable=False)
+    index_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     display_name: Mapped[str] = mapped_column(String(64), nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

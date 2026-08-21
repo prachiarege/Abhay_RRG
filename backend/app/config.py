@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     # --- data provider -----------------------------------------------------------
     # yahoo | csv | nse
     data_provider: str = "yahoo"
+    #: Source preference when a symbol has bars from more than one provider
+    #: (V2-DATA-002). Comma-separated, highest priority first. A date present in an
+    #: earlier source wins; later sources only fill dates the earlier ones lack.
+    #:
+    #: NSE is listed first because it is the exchange itself and therefore authoritative;
+    #: Yahoo follows because it holds the deep history that NSE's day-file archive would
+    #: take thousands of requests to reproduce.
+    source_priority: str = "nse,yahoo,csv"
     csv_data_dir: str = str(DATA_ROOT / "csv")
     provider_timeout_seconds: int = 30
     history_years: int = 12
@@ -122,6 +130,10 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     rate_limit_per_minute: int = 120
     max_tail_length: int = 60
+
+    @property
+    def source_priority_list(self) -> list[str]:
+        return [p.strip() for p in self.source_priority.split(",") if p.strip()]
 
     @property
     def cors_origin_list(self) -> list[str]:

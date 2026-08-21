@@ -86,6 +86,9 @@ def health(
         "last_updated_utc": finished,
         "last_updated_ist": to_ist(finished_dt),
         "data": freshness,
+        # Which providers are actually behind the stored data (SRS V2 6.4 transparency).
+        "sources": ingestion.provider_usage(session),
+        "source_priority": settings.source_priority_list,
         "cache": get_cache().stats(),
         "last_ingestion": last,
     }
@@ -110,7 +113,15 @@ def list_sectors(
             "is_default": s.is_default,
             "active": s.active,
             "provider_symbol": s.provider_symbol,
-            "available": not s.provider_symbol.startswith(UNAVAILABLE_PREFIX),
+            "provider_symbols": s.provider_symbols or {},
+            # Available when at least one provider has an identifier for it. Previously
+            # this asked only whether the legacy Yahoo column held a placeholder, which
+            # marked NSE-served indices as unavailable.
+            "available": bool(s.provider_symbols) or not s.provider_symbol.startswith(
+                UNAVAILABLE_PREFIX
+            ),
+            "index_type": s.index_type,
+            "sector_analysis_allowed": s.sector_analysis_allowed,
         }
         for s in session.scalars(query)
     ]
@@ -131,7 +142,9 @@ def list_benchmarks(
             "display_name": b.display_name,
             "is_default": b.is_default,
             "active": b.active,
-            "available": not b.provider_symbol.startswith(UNAVAILABLE_PREFIX),
+            "available": bool(b.provider_symbols) or not b.provider_symbol.startswith(
+                UNAVAILABLE_PREFIX
+            ),
         }
         for b in session.scalars(query)
     ]

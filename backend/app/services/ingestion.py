@@ -127,6 +127,7 @@ def refresh_prices(
     provider: DataProvider | None = None,
     symbols: dict[str, str] | None = None,
     start: date | None = None,
+    end: date | None = None,
     trigger: str = "manual",
 ) -> IngestionResult:
     """Fetch, validate and store price history for the active universe.
@@ -139,7 +140,13 @@ def refresh_prices(
         trigger: "manual" | "scheduled" | "startup", recorded in the audit log.
     """
     provider = provider or get_provider()
-    symbols = symbols if symbols is not None else ingestable_symbols(session)
+    # Resolve identifiers for THIS provider, not the configured default. Passing
+    # provider=nse while resolving Yahoo tickers would send "^CNXIT" to the NSE archive,
+    # which would then look for an index literally named that.
+    symbols = (
+        symbols if symbols is not None
+        else ingestable_symbols(session, provider=provider.name)
+    )
 
     result = IngestionResult(
         provider=provider.name,
@@ -158,10 +165,14 @@ def refresh_prices(
     session.add(log_row)
     session.commit()
 
-    fetched, errors = provider.fetch_many(symbols, start=start)
+    fetched, errors = provider.fetch_many(symbols, start=start, end=end)
     result.failed.update(errors)
     for symbol, message in errors.items():
         logger.error("ingestion failed for %s: %s", symbol, message)
+
+    # A partial-window backfill legitimately returns fewer bars than a full refresh, so gap
+    # detection against the benchmark calendar is only meaningful for a full-history run.
+    partial_window = start is not None
 
     # Gap detection needs a reference calendar, and the benchmark is the authority on which
     # days were sessions (SRS 28). Without this, a sector missing a month of data validates
@@ -178,7 +189,11 @@ def refresh_prices(
         report = validate_price_series(
             payload.close,
             symbol,
-            expected_calendar=None if symbol == default_benchmark else reference_calendar,
+            expected_calendar=(
+                None
+                if (partial_window or symbol == default_benchmark)
+                else reference_calendar
+            ),
         )
         report.log()
         result.reports[symbol] = report
@@ -230,38 +245,138 @@ def _price_query(symbol: str, source: str | None) -> Select:
     return query.order_by(PriceData.date)
 
 
+def _rows_by_source(session: Session, symbol: str) -> dict[str, list[tuple]]:
+    """All stored bars for a symbol, grouped by which provider supplied them."""
+    grouped: dict[str, list[tuple]] = {}
+    for source, day, close in session.execute(
+        select(PriceData.source, PriceData.date, PriceData.close)
+        .where(PriceData.symbol == symbol)
+        .order_by(PriceData.date)
+    ).all():
+        grouped.setdefault(source, []).append((day, close))
+    return grouped
+
+
+def source_breakdown(
+    session: Session,
+    symbol: str,
+    priority: list[str] | None = None,
+) -> dict[str, int]:
+    """How many bars each source actually CONTRIBUTES to the merged series.
+
+    Not simply a row count per source: a lower-priority source contributes only the dates
+    no higher-priority source covers. This is what makes the merge auditable rather than
+    silent -- SRS V2 6.4 forbids a series quietly alternating between providers, and the
+    honest way to satisfy that is to say exactly who supplied what.
+    """
+    if priority is None:
+        from ..config import get_settings
+
+        priority = get_settings().source_priority_list
+
+    grouped = _rows_by_source(session, symbol)
+    ordered = [s for s in priority if s in grouped] + [
+        s for s in sorted(grouped) if s not in priority
+    ]
+
+    claimed: set = set()
+    contribution: dict[str, int] = {}
+    for source in ordered:
+        dates = {day for day, close in grouped[source] if close is not None}
+        fresh = dates - claimed
+        if fresh:
+            contribution[source] = len(fresh)
+            claimed |= fresh
+    return contribution
+
+
 def load_close_series(
     session: Session,
     symbol: str,
     source: str | None = None,
     end: date | None = None,
+    priority: list[str] | None = None,
 ) -> pd.Series:
     """Daily close series for one symbol, ascending, as a float Series.
 
-    When several providers have supplied the same symbol, `source` selects between
-    them; without it the configured provider is preferred and any other source is used
-    only as a fallback, so results never silently mix vendors within one series.
+    When several providers have supplied the same symbol, sources are merged in priority
+    order: a date present in a higher-priority source wins, and lower-priority sources fill
+    only the dates it lacks. Pass `source` to pin the series to one provider exactly.
+
+    Why merge rather than pick one: the deep history and the current tail can legitimately
+    come from different places. Yahoo holds twelve years but stopped publishing several
+    sector indices for a month; NSE's archive has those missing days but would take
+    thousands of day-file requests to reproduce twelve years. Refusing to merge would mean
+    choosing between a long series with a hole and a short series without one -- and a hole
+    is worse than a join, because a NaN inside a rolling window suppresses months of output.
+
+    The merge is explicit, not silent: `source_breakdown` reports exactly which provider
+    supplied how many bars, and the API surfaces it.
     """
-    if source is None:
-        from ..config import get_settings
-
-        preferred = get_settings().data_provider
-        rows = session.execute(_price_query(symbol, preferred)).all()
-        if not rows:
-            rows = session.execute(_price_query(symbol, None)).all()
-    else:
+    if source is not None:
         rows = session.execute(_price_query(symbol, source)).all()
+        if not rows:
+            return pd.Series(dtype="float64", index=pd.DatetimeIndex([], name="date"))
+        index = pd.DatetimeIndex([pd.Timestamp(r[0]) for r in rows], name="date")
+        series = pd.Series([float(r[1]) for r in rows], index=index, name=symbol)
+    else:
+        if priority is None:
+            from ..config import get_settings
 
-    if not rows:
-        return pd.Series(dtype="float64", index=pd.DatetimeIndex([], name="date"))
+            priority = get_settings().source_priority_list
 
-    index = pd.DatetimeIndex([pd.Timestamp(r[0]) for r in rows], name="date")
-    series = pd.Series([float(r[1]) for r in rows], index=index, name=symbol)
+        grouped = _rows_by_source(session, symbol)
+        if not grouped:
+            return pd.Series(dtype="float64", index=pd.DatetimeIndex([], name="date"))
+
+        # Unlisted sources still get used, after the listed ones, so a provider added
+        # without a config update contributes rather than being silently ignored.
+        ordered = [s for s in priority if s in grouped] + [
+            s for s in sorted(grouped) if s not in priority
+        ]
+
+        merged: pd.Series | None = None
+        for source_name in ordered:
+            rows = grouped[source_name]
+            index = pd.DatetimeIndex([pd.Timestamp(d) for d, _ in rows], name="date")
+            part = pd.Series(
+                [float(c) for _, c in rows], index=index, name=symbol, dtype="float64"
+            )
+            part = part[~part.index.duplicated(keep="last")].sort_index()
+            merged = part if merged is None else merged.combine_first(part)
+        series = merged if merged is not None else pd.Series(
+            dtype="float64", index=pd.DatetimeIndex([], name="date")
+        )
+
     series = series[~series.index.duplicated(keep="last")].sort_index()
-
     if end is not None:
         series = series[series.index <= pd.Timestamp(end)]
     return series
+
+
+def provider_usage(session: Session) -> dict:
+    """Which providers are actually supplying stored data, universe-wide.
+
+    SRS V2 6.4 requires the UI to indicate the provider actually serving the data, and
+    forbids a series silently alternating between providers. One grouped query gives the
+    whole picture cheaply; `source_breakdown` gives the exact per-symbol contribution when
+    a user drills in.
+    """
+    from sqlalchemy import func
+
+    rows = session.execute(
+        select(PriceData.source, func.count(PriceData.symbol.distinct()), func.count(),
+               func.max(PriceData.date))
+        .group_by(PriceData.source)
+    ).all()
+    return {
+        source: {
+            "symbols": int(symbols),
+            "rows": int(total),
+            "latest_date": latest.isoformat() if latest else None,
+        }
+        for source, symbols, total, latest in rows
+    }
 
 
 def data_freshness(session: Session) -> dict:

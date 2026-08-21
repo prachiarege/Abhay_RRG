@@ -42,12 +42,24 @@ if settings.database_url.startswith("sqlite"):
 
 
 def init_db() -> None:
-    """Create tables if absent.
+    """Create missing tables, then add any missing nullable columns.
 
-    Sufficient for MVP. When the schema starts evolving in production, swap this for
-    Alembic; the models are written to be migration-friendly.
+    `create_all` does not alter existing tables, so an installed database would silently
+    keep the old shape after a model change. See app/migrations.py for the deliberately
+    narrow scope of that step, and why Alembic remains the right answer once changes stop
+    being purely additive.
     """
     Base.metadata.create_all(bind=engine)
+
+    from .migrations import apply_additive_migrations
+
+    applied = apply_additive_migrations(engine)
+    if applied:
+        import logging
+
+        logging.getLogger(__name__).info(
+            "applied additive migrations: %s", ", ".join(applied)
+        )
 
 
 def get_session() -> Iterator[Session]:

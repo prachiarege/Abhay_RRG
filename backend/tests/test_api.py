@@ -110,12 +110,31 @@ def test_sectors_listed_from_database(client: TestClient):
     sectors = response.json()
     assert len(sectors) == 17, "all 17 SRS 2.1 sectors should be present as rows"
     assert sum(1 for s in sectors if s["is_default"]) == 10
-    unavailable = [s["symbol"] for s in sectors if not s["available"]]
-    assert set(unavailable) == {
-        "NIFTY_OIL_GAS",
-        "NIFTY_CONSUMER_DUR",
-        "NIFTY_HEALTHCARE",
-    }
+
+    # Every sector is now reachable by at least one provider. The three that Yahoo never
+    # carried -- Oil & Gas, Consumer Durables, Healthcare -- are served by the NSE archive,
+    # so availability is no longer a property of the Yahoo column alone.
+    assert all(s["available"] for s in sectors)
+
+
+def test_availability_is_per_provider(client: TestClient):
+    """`provider_symbols` records which providers can serve each index (V2-DATA-001).
+
+    Yahoo has no ticker for these three; NSE has an index name for all of them. Asserting
+    both halves keeps the mapping honest -- a blanket "available" would hide the fact that
+    a Yahoo-only deployment still cannot plot them.
+    """
+    sectors = {s["symbol"]: s for s in client.get("/api/sectors").json()}
+
+    for symbol in ("NIFTY_OIL_GAS", "NIFTY_CONSUMER_DUR", "NIFTY_HEALTHCARE"):
+        mapping = sectors[symbol]["provider_symbols"]
+        assert "yahoo" not in mapping, f"{symbol} should have no Yahoo ticker"
+        assert mapping.get("nse"), f"{symbol} should have an NSE index name"
+
+    # A sector Yahoo does carry keeps both entries.
+    it_mapping = sectors["NIFTY_IT"]["provider_symbols"]
+    assert it_mapping.get("yahoo") == "^CNXIT"
+    assert it_mapping.get("nse") == "Nifty IT"
 
 
 def test_benchmarks_listed(client: TestClient):

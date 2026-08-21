@@ -37,6 +37,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Ingest Indian index price history")
     parser.add_argument("--symbols", nargs="*", help="canonical symbols; default is all active")
     parser.add_argument("--years", type=float, default=None, help="history window in years")
+    parser.add_argument("--from", dest="date_from", default=None, help="start date YYYY-MM-DD")
+    parser.add_argument("--to", dest="date_to", default=None, help="end date YYYY-MM-DD")
     parser.add_argument("--provider", default=None, help="yahoo | csv | nse")
     parser.add_argument("--rotations", action="store_true", help="rescan rotation events after")
     parser.add_argument("--reseed", action="store_true", help="refresh universe metadata first")
@@ -47,8 +49,13 @@ def main() -> int:
 
     provider = get_provider(args.provider)
     start = None
-    if args.years:
+    end = None
+    if args.date_from:
+        start = date.fromisoformat(args.date_from)
+    elif args.years:
         start = date.today() - timedelta(days=int(args.years * 365.25))
+    if args.date_to:
+        end = date.fromisoformat(args.date_to)
 
     with session_scope() as session:
         seed_universe(session, overwrite=args.reseed)
@@ -56,16 +63,27 @@ def main() -> int:
 
         symbols = None
         if args.symbols:
-            everything = ingestable_symbols(session)
+            # Resolve against the provider actually being used, not the configured
+            # default -- otherwise --provider nse --symbols X fails for any index that
+            # only NSE carries.
+            everything = ingestable_symbols(session, provider=provider.name)
             symbols = {k: v for k, v in everything.items() if k in set(args.symbols)}
             unknown = sorted(set(args.symbols) - set(symbols))
             if unknown:
                 logger.error("unknown or unavailable symbols: %s", ", ".join(unknown))
                 return 2
 
-        result = refresh_prices(
-            session, provider=provider, symbols=symbols, start=start, trigger="cli"
-        )
+        if end is not None:
+            # A bounded window is a backfill, so say so in the audit log rather than
+            # recording it as a routine refresh.
+            result = refresh_prices(
+                session, provider=provider, symbols=symbols, start=start,
+                end=end, trigger="backfill",
+            )
+        else:
+            result = refresh_prices(
+                session, provider=provider, symbols=symbols, start=start, trigger="cli"
+            )
 
         print()
         print(f"provider     : {result.provider}")
